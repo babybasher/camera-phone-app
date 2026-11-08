@@ -245,7 +245,9 @@ class CameraService : Service() {
 
     // ---------------------------------------------------------------- the camera
 
-    private fun needCamera() = wantStream || motionOn || rec != null || photoWanted
+    private fun needCamera() = wantStream || motionOn || rec != null || photoWanted || thumbWanted
+    @Volatile private var thumbWanted = true
+    private var lastThumb = 0L
 
     private fun res() = settings.optInt("res", 720)
     private fun fps() = settings.optInt("fps", 15)
@@ -286,7 +288,7 @@ class CameraService : Service() {
             }) ?: throw IOException("could not open the camera")
             val helper = SurfaceTextureHelper.create("capture", egl.eglBaseContext)
             val src = factory.createVideoSource(false)
-            cap.initialize(helper, applicationContext, src.capturerObserver)
+            cap.initialize(helper, applicationContext, TurnObserver(src.capturerObserver) { settings.optInt("rotate", 0) })
             val r = res()
             cap.startCapture(r * 16 / 9 / 2 * 2, r, fps())
             val track = factory.createVideoTrack("video", src)
@@ -344,6 +346,18 @@ class CameraService : Service() {
                 }.start()
             }
         }
+        if (thumbWanted && now - camStartedAt > 1500) {
+            thumbWanted = false
+            lastThumb = now
+            val b = frame.buffer
+            val tw = 480
+            val th = (b.height * tw / maxOf(1, b.width)) / 2 * 2
+            val small = b.cropAndScale(0, 0, b.width, b.height, tw, th)
+            val i = small.toI420()
+            small.release()
+            val rot = frame.rotation
+            if (i != null) Thread { try { sendThumb(i, rot) } finally { i.release() }; h.post { update() } }.start()
+        }
         if (motionOn && now - lastMotionCheck >= 250) {
             lastMotionCheck = now
             val b = frame.buffer
@@ -393,12 +407,16 @@ class CameraService : Service() {
 
     private fun stamp(t: Long) = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(Date(t))
 
-    private fun startRecording(seconds: Int) {
+    private var recManual = false
+
+    private fun startRecording(seconds: Int, manual: Boolean = false) {
         val now = System.currentTimeMillis()
         if (rec != null) {
             recUntil = maxOf(recUntil, now + seconds * 1000L)
+            if (manual) recManual = true
             return
         }
+        recManual = manual
         recUntil = now + seconds * 1000L
         update()
         if (videoTrack == null) return
@@ -431,14 +449,34 @@ class CameraService : Service() {
     }
 
     private fun tick() {
-        val r = rec ?: return
         val now = System.currentTimeMillis()
-        val max = settings.optInt("max_clip", 120) * 1000L
-        if (now > recUntil || now - recStarted > max) finishRecording()
-        if (r === rec && videoTrack == null) finishRecording()
+        // Thumbnail for the camera list.
+        val gap = if (videoTrack != null) 60_000L else 600_000L
+        if (!thumbWanted && cfg.ready && now - lastThumb > gap) { thumbWanted = true; update() }
+        val r = rec ?: return
+        if (now > recUntil || videoTrack == null) { finishRecording(); return }
+        if (recManual) {
+            // Long recordings are saved in 10-minute parts, so each upload stays a sensible size.
+            if (now - recStarted > 600_000L) {
+                val left = ((recUntil - now) / 1000).toInt()
+                finishRecording()
+                if (left > 2) startRecording(left, true)
+            }
+        } else if (now - recStarted > settings.optInt("max_clip", 120) * 1000L) {
+            finishRecording()
+        }
+        if (r !== rec) report()
     }
 
     private fun savePhoto(b: VideoFrame.I420Buffer, rotation: Int) {
+        val bytes = jpeg(b, rotation, 92)
+        val now = System.currentTimeMillis()
+        val f = File(uploader.dir, "photo-$now.jpg")
+        f.writeBytes(bytes)
+        uploader.add(f, "photo", stamp(now), 0, "jpg")
+    }
+
+    private fun jpeg(b: VideoFrame.I420Buffer, rotation: Int, quality: Int): ByteArray {
         val w = b.width
         val hgt = b.height
         val nv21 = ByteArray(w * hgt * 3 / 2)
@@ -455,21 +493,28 @@ class CameraService : Service() {
             nv21[o++] = u.get(row * b.strideU + col)
         }
         val out = ByteArrayOutputStream()
-        YuvImage(nv21, ImageFormat.NV21, w, hgt, null).compressToJpeg(Rect(0, 0, w, hgt), 92, out)
+        YuvImage(nv21, ImageFormat.NV21, w, hgt, null).compressToJpeg(Rect(0, 0, w, hgt), quality, out)
         var bytes = out.toByteArray()
         if (rotation % 360 != 0) {
             val bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
             val m = Matrix().apply { postRotate(rotation.toFloat()) }
             val rot = Bitmap.createBitmap(bmp, 0, 0, bmp.width, bmp.height, m, true)
             val o2 = ByteArrayOutputStream()
-            rot.compress(Bitmap.CompressFormat.JPEG, 92, o2)
+            rot.compress(Bitmap.CompressFormat.JPEG, quality, o2)
             bytes = o2.toByteArray()
             bmp.recycle(); rot.recycle()
         }
-        val now = System.currentTimeMillis()
-        val f = File(uploader.dir, "photo-$now.jpg")
-        f.writeBytes(bytes)
-        uploader.add(f, "photo", stamp(now), 0, "jpg")
+        return bytes
+    }
+
+    /** A small picture for the camera list: when the camera starts, every minute while on, and every 10 minutes otherwise. */
+    private fun sendThumb(b: VideoFrame.I420Buffer, rotation: Int) {
+        val bytes = jpeg(b, rotation, 80)
+        val req = Request.Builder().url(cfg.api + "/api/phone/" + cfg.id + "/thumb")
+            .header("Authorization", "Bearer ${cfg.token}")
+            .post(bytes.toRequestBody("image/jpeg".toMediaType()))
+            .build()
+        try { Net.http.newCall(req).execute().close() } catch (e: Exception) { Log.w(TAG, "thumbnail: $e") }
     }
 
     // ---------------------------------------------------------------- live view and talk
@@ -591,9 +636,13 @@ class CameraService : Service() {
         return result
     }
 
-    /** The video service needs H.264: list it first in the offer. */
+    /**
+     * The video service needs H.264: list it first in the offer. Also leave out
+     * the "video orientation" tag: the video service ignores it, which made the
+     * picture sideways. Without it the phone turns the frames itself.
+     */
     private fun preferH264(sdp: String): String {
-        val lines = sdp.split("\r\n").toMutableList()
+        val lines = sdp.split("\r\n").filterNot { it.contains("urn:3gpp:video-orientation") }.toMutableList()
         val mi = lines.indexOfFirst { it.startsWith("m=video") }
         if (mi < 0) return sdp
         val h264 = HashSet<String>()
@@ -671,7 +720,7 @@ class CameraService : Service() {
                 "settings" -> applySettings(m.optJSONObject("settings") ?: JSONObject())
                 "name" -> { name = m.optString("name"); cfg.name = name; changed() }
                 "stream" -> { wantStream = m.optBoolean("on"); update() }
-                "record" -> if (m.optBoolean("stop")) finishRecording() else startRecording(m.optInt("seconds", 30))
+                "record" -> if (m.optBoolean("stop")) finishRecording() else startRecording(m.optInt("seconds", 30).coerceIn(5, 3600), true)
                 "photo" -> { photoWanted = true; update() }
                 "talk" -> setTalk(m.optBoolean("on"))
                 "torch" -> {}
@@ -794,5 +843,16 @@ class Uploader(ctx: Context, private val cfg: Prefs, private val changed: () -> 
         } finally {
             busy = false
         }
+    }
+}
+
+/** Adds the "Turn the picture" setting to every camera frame. */
+class TurnObserver(private val inner: CapturerObserver, private val extra: () -> Int) : CapturerObserver {
+    override fun onCapturerStarted(ok: Boolean) = inner.onCapturerStarted(ok)
+    override fun onCapturerStopped() = inner.onCapturerStopped()
+    override fun onFrameCaptured(f: VideoFrame) {
+        val e = extra()
+        if (e == 0) inner.onFrameCaptured(f)
+        else inner.onFrameCaptured(VideoFrame(f.buffer, (f.rotation + e) % 360, f.timestampNs))
     }
 }

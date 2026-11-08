@@ -154,7 +154,9 @@ class MainActivity : Activity() {
             val user = field("Username (camera page login)", cfg.user, InputType.TYPE_CLASS_TEXT)
             val pass = field("Password", "", InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD)
             val name = field("Camera name, e.g. Kitchen", cfg.name, InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_CAP_WORDS)
-            addView(server); addView(user); addView(pass); addView(name)
+            addView(server)
+            if (cfg.server.isEmpty()) addView(text("Tip: on the camera page, Add camera → Open the app fills in the address for you.", 13f, muted))
+            addView(user); addView(pass); addView(name)
             addView(text("Using the name of a phone camera that is already in the list takes it over (keeps its recordings and settings).", 13f, muted))
             val msg = text("", 15f, Color.parseColor("#FFB4A8"))
             val go = button("Connect", primary = true) {}
