@@ -50,20 +50,51 @@ class MainActivity : Activity() {
         cfg = Prefs(this)
         window.statusBarColor = bg
         window.navigationBarColor = bg
-        intent?.data?.let { fromLink(it) }
-        show()
+        if (intent?.data?.let { fromLink(it) } != true) show()
     }
 
     override fun onNewIntent(i: Intent?) {
         super.onNewIntent(i)
-        i?.data?.let { fromLink(it) }
-        show()
+        setIntent(i)
+        if (i?.data?.let { fromLink(it) } != true) show()
     }
 
-    /** homecam://setup?server=https://... from the "Use this device as a camera" page. */
-    private fun fromLink(u: Uri) {
-        val s = u.getQueryParameter("server") ?: return
+    /**
+     * homecam://setup?server=https://... from the camera page, plus
+     * &api=...&pair=<code> from a QR code: then the app sets itself up.
+     * Returns true when it is setting itself up.
+     */
+    private fun fromLink(u: Uri): Boolean {
+        val s = u.getQueryParameter("server") ?: return false
         if (s.startsWith("https://") || s.startsWith("http://")) cfg.server = s.trimEnd('/')
+        val code = u.getQueryParameter("pair") ?: return false
+        val api = u.getQueryParameter("api")?.trimEnd('/') ?: return false
+        if (!api.startsWith("https://")) return false
+        pairWith(api, code)
+        return true
+    }
+
+    private var setupMessage = ""
+
+    private fun pairWith(api: String, code: String) {
+        page {
+            addView(text("Setting up the camera...", 24f, bold = true))
+            addView(text("Using the setup code from the QR code.", 15f, muted))
+        }
+        Thread {
+            val err = try {
+                val r = Net.call(api, "", "POST", "/api/phone/pair", JSONObject().put("code", code))
+                if (CameraService.instance != null) runOnUiThread { CameraService.stop(this) }
+                cfg.server = r.getString("server"); cfg.user = r.optString("user"); cfg.pass = r.optString("pass")
+                cfg.api = api; cfg.token = r.getString("token"); cfg.id = r.getString("id"); cfg.name = r.optString("name")
+                null
+            } catch (e: Exception) { e.message ?: e.toString() }
+            runOnUiThread {
+                intent?.data = null
+                if (err == null) { show(); askPermissions() }
+                else { setupMessage = "The QR code didn't work: $err"; show() }
+            }
+        }.start()
     }
 
     override fun onResume() {
@@ -158,7 +189,8 @@ class MainActivity : Activity() {
             if (cfg.server.isEmpty()) addView(text("Tip: on the camera page, Add camera → Open the app fills in the address for you.", 13f, muted))
             addView(user); addView(pass); addView(name)
             addView(text("Using the name of a phone camera that is already in the list takes it over (keeps its recordings and settings).", 13f, muted))
-            val msg = text("", 15f, Color.parseColor("#FFB4A8"))
+            val msg = text(setupMessage, 15f, Color.parseColor("#FFB4A8"))
+            setupMessage = ""
             val go = button("Connect", primary = true) {}
             go.setOnClickListener {
                 var s = server.text.toString().trim().trimEnd('/')
