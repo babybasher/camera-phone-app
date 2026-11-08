@@ -17,6 +17,9 @@ import android.graphics.Matrix
 import android.graphics.Rect
 import android.graphics.YuvImage
 import android.media.AudioManager
+import android.net.ConnectivityManager
+import android.net.Network
+import android.net.NetworkCapabilities
 import android.net.wifi.WifiManager
 import android.os.BatteryManager
 import android.os.Build
@@ -145,6 +148,7 @@ class CameraService : Service() {
         wifi = (applicationContext.getSystemService(WIFI_SERVICE) as WifiManager)
             .createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "homecam:wifi").apply { setReferenceCounted(false); acquire() }
         uploader = Uploader(this, cfg) { changed() }
+        watchNetwork()
         h.post {
             setupWebrtc()
             connect()
@@ -167,6 +171,7 @@ class CameraService : Service() {
 
     override fun onDestroy() {
         stopped = true
+        netCallback?.let { try { getSystemService(ConnectivityManager::class.java).unregisterNetworkCallback(it) } catch (_: Exception) {} }
         instance = null
         val done = CountDownLatch(1)
         h.post {
@@ -187,6 +192,35 @@ class CameraService : Service() {
         h.postDelayed({ worker.quitSafely() }, 3000)
         changed()
         super.onDestroy()
+    }
+
+    // ---------------------------------------------------------------- network changes
+
+    private var netCallback: ConnectivityManager.NetworkCallback? = null
+
+    /**
+     * When Wi-Fi comes back (or the phone switches network), drop old
+     * connections and get going straight away: reconnect and upload what's waiting.
+     */
+    private fun watchNetwork() {
+        val cb = object : ConnectivityManager.NetworkCallback() {
+            override fun onAvailable(n: Network) = fresh()
+            override fun onLost(n: Network) { Net.http.connectionPool.evictAll() }
+            override fun onCapabilitiesChanged(n: Network, c: NetworkCapabilities) {}
+        }
+        try {
+            getSystemService(ConnectivityManager::class.java).registerDefaultNetworkCallback(cb)
+            netCallback = cb
+        } catch (e: Exception) { Log.w(TAG, "network watch: $e") }
+    }
+
+    private fun fresh() {
+        Net.http.connectionPool.evictAll()
+        uploader.kick()
+        h.postDelayed({
+            if (!linked && !stopped) { backoff = 1000; connect() }
+            if (pubState == "FAILED" || pubState == "DISCONNECTED") { closePublish(); if (needCamera()) ensurePublish() }
+        }, 1500)
     }
 
     // ---------------------------------------------------------------- notification
@@ -787,14 +821,18 @@ class Uploader(ctx: Context, private val cfg: Prefs, private val changed: () -> 
     private val thread = HandlerThread("upload").apply { start() }
     private val h = Handler(thread.looper)
     private var busy = false
+    private var retry = 5_000L
+    private val again = Runnable { flush() }
 
     init {
-        h.post(object : Runnable {
-            override fun run() {
-                flush()
-                h.postDelayed(this, 30_000)
-            }
-        })
+        h.post { flush() }
+    }
+
+    /** Try now (e.g. Wi-Fi just came back). */
+    fun kick() {
+        retry = 5_000L
+        h.removeCallbacks(again)
+        h.post(again)
     }
 
     fun waiting() = dir.listFiles { f -> f.name.endsWith(".json") }?.size ?: 0
@@ -803,7 +841,7 @@ class Uploader(ctx: Context, private val cfg: Prefs, private val changed: () -> 
         File(dir, f.name + ".json").writeText(
             JSONObject().put("kind", kind).put("t", t).put("secs", secs).put("ext", ext).toString())
         changed()
-        h.post { flush() }
+        kick()
     }
 
     fun stop() = thread.quitSafely()
@@ -837,9 +875,15 @@ class Uploader(ctx: Context, private val cfg: Prefs, private val changed: () -> 
                     changed()
                 } catch (e: Exception) {
                     Log.w("Uploader", "upload ${data.name}: $e")
-                    break
+                    Net.http.connectionPool.evictAll()
+                    // Try again soon, then less often: 5 s, 10 s, 20 s ... up to a minute.
+                    h.removeCallbacks(again)
+                    h.postDelayed(again, retry)
+                    retry = minOf(retry * 2, 60_000L)
+                    return
                 }
             }
+            retry = 5_000L
         } finally {
             busy = false
         }

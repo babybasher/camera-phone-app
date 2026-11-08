@@ -66,7 +66,9 @@ object Net {
     val http: OkHttpClient = OkHttpClient.Builder()
         .connectTimeout(10, TimeUnit.SECONDS)
         .readTimeout(30, TimeUnit.SECONDS)
-        .writeTimeout(5, TimeUnit.MINUTES)
+        .writeTimeout(45, TimeUnit.SECONDS)
+        // A connection left over from before a Wi-Fi drop can hang; check it's alive before reusing it.
+        .retryOnConnectionFailure(true)
         .build()
     val ws: OkHttpClient = http.newBuilder().readTimeout(0, TimeUnit.SECONDS).build()
 
