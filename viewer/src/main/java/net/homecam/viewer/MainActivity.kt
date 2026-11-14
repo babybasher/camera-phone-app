@@ -115,6 +115,7 @@ class MainActivity : Activity() {
             cfg.lan = j.getString("lan")
             cfg.router = j.getString("router")
             cfg.page = j.getString("page")
+            cfg.api = api
         } finally { c.disconnect() }
     }
 
@@ -184,7 +185,7 @@ class MainActivity : Activity() {
     }
 
     private fun show() {
-        statusView = null; problemView = null; toggle = null
+        statusView = null; problemView = null; toggle = null; updateButton = null
         if (!cfg.ready) {
             page {
                 addView(text("Camera Link", 26f, bold = true))
@@ -218,9 +219,54 @@ class MainActivity : Activity() {
                     .setNegativeButton("Cancel", null)
                     .show()
             })
+            val upMsg = text("", 14f, muted)
+            val up = button("") {}
+            up.setOnClickListener { updateTapped(upMsg) }
+            updateButton = up
+            Updater.onStatus = { upMsg.setTextColor(warn); upMsg.text = it }
+            addView(up)
+            addView(upMsg)
             addView(text("Camera Link ${BuildConfig.VERSION_NAME}  -  ${cfg.host}", 12f, muted))
         }
         refresh()
+    }
+
+    // ---------------------------------------------------------------- app update
+
+    private var updateButton: Button? = null
+    private var updateBusy = false
+
+    /** Checks with home; when there is a newer app, the next tap installs it. */
+    private fun updateTapped(msg: TextView) {
+        if (updateBusy) return
+        updateBusy = true
+        updateButton?.isEnabled = false
+        val install = Updater.available
+        msg.setTextColor(muted)
+        msg.text = if (install) "Downloading..." else "Checking..."
+        Thread {
+            var line: String
+            var bad = false
+            try {
+                if (install) {
+                    Updater.install(applicationContext, cfg) { pc -> runOnUiThread { msg.text = "Downloading... $pc%" } }
+                    line = "Downloaded. Android now asks to install it (the first time it also asks to allow installs from this app). The link comes back on by itself afterwards."
+                } else {
+                    Updater.hello(cfg)
+                    line = if (Updater.available) "Version 1.0.${Updater.latest} is available." else "This is the latest version."
+                }
+            } catch (e: Exception) {
+                bad = true
+                line = (if (install) "Update failed: " else "Could not check (the link has to be on and home answering): ") + (e.message ?: e.toString())
+            }
+            runOnUiThread {
+                updateBusy = false
+                updateButton?.isEnabled = true
+                msg.setTextColor(if (bad) warn else muted)
+                msg.text = line
+                refresh()
+            }
+        }.start()
     }
 
     private var probing = false
@@ -239,6 +285,7 @@ class MainActivity : Activity() {
         problemView?.text = p
         problemView?.visibility = if (p.isEmpty()) View.GONE else View.VISIBLE
         toggle?.text = if (cfg.enabled) "Turn the link off" else "Turn the link on"
+        updateButton?.text = if (Updater.available) "Install version 1.0.${Updater.latest}" else "Check for updates"
         if (on && reach.isEmpty() && !probing) probe()
         if (!on) reach = ""
     }

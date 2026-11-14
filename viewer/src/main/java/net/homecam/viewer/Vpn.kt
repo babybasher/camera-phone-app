@@ -38,6 +38,8 @@ class Store(ctx: Context) {
     /** The home network, e.g. 192.168.50.0/24, and the router's address on it. */
     var lan: String get() = s("lan"); set(v) = put("lan", v)
     var router: String get() = s("router"); set(v) = put("router", v)
+    /** The router's control service, e.g. https://name.duckdns.org:1987 (phones set up before 1.0.11 didn't keep it). */
+    var api: String get() = s("api").ifEmpty { "https://$host:1987" }; set(v) = put("api", v)
     /** The camera page. */
     var page: String get() = s("page"); set(v) = put("page", v)
     /** Home's internet address when last seen (used if the name can't be looked up). */
@@ -181,6 +183,8 @@ object Vpn {
             val ip = lookup(app, s.host)
             if (!running) bring(app, s, ip)
             else if (ip != null && ip != builtFor) bring(app, s, ip)
+            // Say which version this is; hear whether there is a newer one.
+            try { val before = Updater.latest; Updater.hello(s); if (Updater.latest != before) changed() } catch (_: Exception) {}
         }
     }
 }
