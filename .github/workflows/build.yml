@@ -25,13 +25,16 @@ jobs:
           export KS_PASS="$(cat signing/ks_pass)"
           gradle --no-daemon assembleRelease
           cp app/build/outputs/apk/release/app-release.apk camera.apk
+          cp viewer/build/outputs/apk/release/viewer-release.apk camera-link.apk
       - uses: actions/upload-artifact@v4
         with:
           name: camera-apk
-          path: camera.apk
+          path: |
+            camera.apk
+            camera-link.apk
       - name: Publish the app on the apk branch
         run: |
-          mkdir out && cp camera.apk out/ && cd out
+          mkdir out && cp camera.apk camera-link.apk out/ && cd out
           echo "${{ github.run_number }} ${{ github.sha }}" > version.txt
           git init -q -b apk
           git config user.name "build"

@@ -15,3 +15,11 @@ screen off.
 Built by GitHub Actions on every push (artifact `camera-apk`). The signing key is
 in `signing/` (this repo is private): keep it, since Android only installs updates
 signed with the same key.
+
+## Camera Link (`viewer/`)
+
+A second, separate app (`net.homecam.viewer`, file `camera-link.apk`) for phones that *watch* the cameras.
+It is a preconfigured WireGuard tunnel (the official tunnel library) that carries only traffic for the home
+network and for home's own internet address, so the normal camera page works in Chrome away from home.
+The phone makes its own key; the camera page's Remote viewing page hands it a one-time code
+(`homecamview://setup?api=...&code=...`) and the router (`camctl`, `/api/vpn/join`) adds the phone as a peer.
