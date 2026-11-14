@@ -52,8 +52,8 @@ class Store(ctx: Context) {
 
 /**
  * The link home: a WireGuard tunnel that carries only traffic for the home
- * network (and for home's own internet address, so the camera page's normal
- * address works through it). Everything else on the phone is left alone.
+ * network. Name lookups go to the home router while it is on; everything
+ * else on the phone uses its normal connection.
  */
 object Vpn {
     @Volatile var state: Tunnel.State = Tunnel.State.DOWN
@@ -80,9 +80,29 @@ object Vpn {
         backend ?: GoBackend(ctx.applicationContext).also { backend = it }
     }
 
-    private fun lookup(host: String): String? = try {
-        InetAddress.getAllByName(host).firstOrNull { it is Inet4Address }?.hostAddress
-    } catch (_: Exception) { null }
+    /**
+     * Home's address as the phone's real network (Wi-Fi or mobile) sees it. It must not be asked
+     * through the link: name lookups inside the link go to the home router, which answers with
+     * its home address, and that can't be reached from outside.
+     */
+    private fun lookup(ctx: Context, host: String): String? {
+        try {
+            val cm = ctx.getSystemService(ConnectivityManager::class.java)
+            @Suppress("DEPRECATION")
+            for (n in cm.allNetworks) {
+                val caps = cm.getNetworkCapabilities(n) ?: continue
+                if (caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) continue
+                if (!caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)) continue
+                val ip = try { n.getAllByName(host).firstOrNull { it is Inet4Address }?.hostAddress } catch (_: Exception) { null }
+                if (ip != null) return ip
+            }
+        } catch (_: Exception) {}
+        // No link running yet: the ordinary lookup is the real network's.
+        if (state != Tunnel.State.UP) {
+            try { return InetAddress.getAllByName(host).firstOrNull { it is Inet4Address }?.hostAddress } catch (_: Exception) {}
+        }
+        return null
+    }
 
     private fun toInt(ip: String): Long? {
         val parts = ip.split('.')
@@ -103,15 +123,15 @@ object Vpn {
     }
 
     private fun config(s: Store, ip: String): Config {
-        // Home's own internet address goes through the link too, so the camera page's usual name works.
-        val allowed = if (inside(ip, s.lan)) s.lan else s.lan + ", " + ip + "/32"
-        val me = Interface.Builder().parsePrivateKey(s.privateKey).parseAddresses(s.address + "/32").build()
-        val home = Peer.Builder().parsePublicKey(s.serverPub).parseEndpoint(ip + ":" + s.port).parseAllowedIPs(allowed).build()
+        // Only the home network goes through the link. Names are looked up by the home router (as the
+        // WireGuard app does), because it knows the camera page's name means the router itself.
+        val me = Interface.Builder().parsePrivateKey(s.privateKey).parseAddresses(s.address + "/32").parseDnsServers(s.router).build()
+        val home = Peer.Builder().parsePublicKey(s.serverPub).parseEndpoint(ip + ":" + s.port).parseAllowedIPs(s.lan).build()
         return Config.Builder().setInterface(me).addPeer(home).build()
     }
 
     private fun bring(ctx: Context, s: Store, known: String?) {
-        val ip = known ?: lookup(s.host) ?: s.lastIp.ifEmpty { null }
+        val ip = known ?: lookup(ctx, s.host) ?: s.lastIp.ifEmpty { null }
         if (ip == null) {
             problem = "Can't look up ${s.host} right now (no internet?). It keeps trying."
             changed()
@@ -158,7 +178,7 @@ object Vpn {
             if (!s.ready || !s.enabled) return@execute
             if (VpnService.prepare(app) != null) return@execute
             val running = try { backend(app).getState(tunnel) == Tunnel.State.UP } catch (_: Exception) { false }
-            val ip = lookup(s.host)
+            val ip = lookup(app, s.host)
             if (!running) bring(app, s, ip)
             else if (ip != null && ip != builtFor) bring(app, s, ip)
         }
