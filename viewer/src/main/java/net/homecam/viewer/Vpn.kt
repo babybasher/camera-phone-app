@@ -40,6 +40,8 @@ class Store(ctx: Context) {
     var router: String get() = s("router"); set(v) = put("router", v)
     /** The router's control service, e.g. https://name.duckdns.org:1987 (phones set up before 1.0.11 didn't keep it). */
     var api: String get() = s("api").ifEmpty { "https://$host:1987" }; set(v) = put("api", v)
+    /** The word that lets this phone take itself off home's device list when it unlinks. */
+    var leave: String get() = s("leave"); set(v) = put("leave", v)
     /** The camera page. */
     var page: String get() = s("page"); set(v) = put("page", v)
     /** Home's internet address when last seen (used if the name can't be looked up). */

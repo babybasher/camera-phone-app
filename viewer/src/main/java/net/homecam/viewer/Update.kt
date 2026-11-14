@@ -48,6 +48,20 @@ object Updater {
         } finally { c.disconnect() }
     }
 
+    /** Unlinking: take this phone off home's device list. True when home confirmed it. */
+    fun leave(s: Store): Boolean {
+        if (s.leave.isEmpty()) return false
+        val c = open(s, "/api/vpn/leave")
+        return try {
+            c.requestMethod = "POST"
+            c.doOutput = true
+            c.setRequestProperty("Content-Type", "application/json")
+            c.outputStream.use { it.write(JSONObject().put("leave", s.leave).toString().toByteArray()) }
+            // 404 = already gone from the list.
+            c.responseCode in 200..299 || c.responseCode == 404
+        } catch (_: Exception) { false } finally { c.disconnect() }
+    }
+
     /** Download the app and hand it to Android, which then asks the user to confirm. */
     fun install(ctx: Context, s: Store, progress: (Int) -> Unit) {
         val c = open(s, "/api/vpn/app.apk")

@@ -116,6 +116,7 @@ class MainActivity : Activity() {
             cfg.router = j.getString("router")
             cfg.page = j.getString("page")
             cfg.api = api
+            cfg.leave = j.optString("leave")
         } finally { c.disconnect() }
     }
 
@@ -210,12 +211,8 @@ class MainActivity : Activity() {
                 "Only camera traffic uses the link. It turns itself back on after the phone restarts.", 14f, muted))
             addView(button("Remove the link from this phone") {
                 AlertDialog.Builder(this@MainActivity)
-                    .setMessage("Remove the link? This phone will no longer reach the cameras away from home. To finish, also remove this phone under Remote viewing on the camera page.")
-                    .setPositiveButton("Remove") { _, _ ->
-                        Vpn.down(this@MainActivity)
-                        cfg.clear()
-                        show()
-                    }
+                    .setMessage("Remove the link? This phone will no longer reach the cameras away from home.")
+                    .setPositiveButton("Remove") { _, _ -> unlink() }
                     .setNegativeButton("Cancel", null)
                     .show()
             })
@@ -229,6 +226,21 @@ class MainActivity : Activity() {
             addView(text("Camera Link ${BuildConfig.VERSION_NAME}  -  ${cfg.host}", 12f, muted))
         }
         refresh()
+    }
+
+    /** Tell home to forget this phone (while the link can still carry the message), then forget home. */
+    private fun unlink() {
+        page { addView(text("Removing the link...", 24f, bold = true)) }
+        Thread {
+            val told = Updater.leave(cfg)
+            runOnUiThread {
+                Vpn.down(this)
+                cfg.clear()
+                message = if (told) "The link is removed, and home has taken this phone off its list."
+                    else "The link is removed from this phone. Home couldn't be told, so also remove this phone under Remote viewing on the camera page."
+                show()
+            }
+        }.start()
     }
 
     // ---------------------------------------------------------------- app update
