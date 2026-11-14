@@ -9,6 +9,8 @@ screen off.
 - Talk: plays `<id>_talk` from go2rtc.
 - Clips (mp4, phone encoders) and photos: uploaded to camctl, then deleted from the phone.
 - Motion detection: small greyscale frame differencing, same rule as the web page.
+- Updates: "Check for updates" reads `app-version.txt` (the build number) from the camera page and
+  installs `camera.apk` from there.
 
 Built by GitHub Actions on every push (artifact `camera-apk`). The signing key is
 in `signing/` (this repo is private): keep it, since Android only installs updates

@@ -22,7 +22,7 @@ class BootReceiver : BroadcastReceiver() {
         val n = Notification.Builder(ctx, "restart")
             .setSmallIcon(R.drawable.ic_cam)
             .setContentTitle("${cfg.name.ifEmpty { "Phone" }} camera is off")
-            .setContentText("The phone restarted. Tap to turn the camera back on.")
+            .setContentText((if (intent.action == Intent.ACTION_MY_PACKAGE_REPLACED) "The app was updated." else "The phone restarted.") + " Tap to turn the camera back on.")
             .setContentIntent(open)
             .setAutoCancel(true)
             .build()

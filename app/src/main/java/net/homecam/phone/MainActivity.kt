@@ -317,9 +317,56 @@ class MainActivity : Activity() {
                     .setNegativeButton("Cancel", null)
                     .show()
             })
+            val upMsg = text("", 14f, muted)
+            val up = button(if (updateTo > 0) "Install version 1.0.$updateTo" else "Check for updates") {}
+            up.setOnClickListener { updateTapped(up, upMsg) }
+            Updater.onStatus = { upMsg.setTextColor(warn); upMsg.text = it }
+            addView(up)
+            addView(upMsg)
             addView(text("Phone Camera ${BuildConfig.VERSION_NAME}", 12f, muted))
         }
         refresh()
+    }
+
+    // ---------------------------------------------------------------- app update
+
+    private val warn = Color.parseColor("#FFB4A8")
+    private var updateTo = 0
+    private var updateBusy = false
+
+    /** First tap asks the camera system which app version it holds; if newer, the next tap installs it. */
+    private fun updateTapped(b: Button, msg: TextView) {
+        if (updateBusy) return
+        updateBusy = true
+        b.isEnabled = false
+        val want = updateTo
+        msg.setTextColor(muted)
+        msg.text = if (want > 0) "Downloading..." else "Checking..."
+        Thread {
+            var line: String
+            var bad = false
+            try {
+                if (want > 0) {
+                    Updater.install(applicationContext, cfg) { pc -> runOnUiThread { msg.text = "Downloading... $pc%" } }
+                    line = "Downloaded. Android now asks to install it (the first time it also asks to allow installs from this app). " +
+                        "The camera goes off during the update: afterwards tap the notification, or open the app, to turn it back on."
+                } else {
+                    val v = Updater.latest(cfg)
+                    if (v > BuildConfig.VERSION_CODE) { updateTo = v; line = "Version 1.0.$v is available." }
+                    else line = "This is the latest version."
+                }
+            } catch (e: Exception) {
+                bad = true
+                line = (if (want > 0) "Update failed: " else "Could not check: ") + (e.message ?: e.toString())
+            }
+            runOnUiThread {
+                updateBusy = false
+                b.isEnabled = true
+                b.text = if (updateTo > 0) "Install version 1.0.$updateTo" else "Check for updates"
+                msg.setTextColor(if (bad) warn else muted)
+                msg.text = line
+            }
+        }.start()
     }
 
     private fun refresh() {
