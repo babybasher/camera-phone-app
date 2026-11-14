@@ -16,6 +16,9 @@ import android.graphics.ImageFormat
 import android.graphics.Matrix
 import android.graphics.Rect
 import android.graphics.YuvImage
+import android.hardware.camera2.CameraCaptureSession
+import android.hardware.camera2.CameraDevice
+import android.hardware.camera2.CaptureRequest
 import android.media.AudioManager
 import android.net.ConnectivityManager
 import android.net.Network
@@ -29,6 +32,8 @@ import android.os.IBinder
 import android.os.Looper
 import android.os.PowerManager
 import android.util.Log
+import android.util.Range
+import android.view.Surface
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.asRequestBody
@@ -90,6 +95,17 @@ class CameraService : Service() {
     private var motionOn = false
     private var photoWanted = false
     private var stopped = false
+
+    // Photos at the camera's full size, the torch, and the motion area
+    @Volatile private var photoBusy = false
+    @Volatile private var fullFailed = false
+    @Volatile private var lastRot = 0
+    private var camDev = ""
+    private var torchCmd = false
+    private var torchOn = false
+    private var zoneKey = ""
+    private var zoneMask: BooleanArray? = null
+    private var zoneCount = 64 * 48
 
     // WebRTC
     lateinit var egl: EglBase
@@ -317,7 +333,7 @@ class CameraService : Service() {
                 override fun onCameraDisconnected() { problem = "The camera was taken by another app."; changed() }
                 override fun onCameraFreezed(e: String?) { Log.w(TAG, "camera frozen: $e") }
                 override fun onCameraOpening(n: String?) {}
-                override fun onFirstFrameAvailable() { problem = ""; changed() }
+                override fun onFirstFrameAvailable() { problem = ""; changed(); h.postDelayed({ if (wantTorch()) applyTorch() }, 300) }
                 override fun onCameraClosed() {}
             }) ?: throw IOException("could not open the camera")
             val helper = SurfaceTextureHelper.create("capture", egl.eglBaseContext)
@@ -328,6 +344,8 @@ class CameraService : Service() {
             val track = factory.createVideoTrack("video", src)
             track.addSink(sink)
             capturer = cap
+            camDev = dev
+            torchOn = false
             texHelper = helper
             videoSource = src
             videoTrack = track
@@ -351,6 +369,7 @@ class CameraService : Service() {
         closePublish()
         try { capturer?.stopCapture() } catch (_: Exception) {}
         capturer?.dispose(); capturer = null
+        torchOn = false
         videoTrack?.removeSink(sink)
         videoTrack?.dispose(); videoTrack = null
         videoSource?.dispose(); videoSource = null
@@ -369,8 +388,14 @@ class CameraService : Service() {
     private val sink = VideoSink { frame ->
         rec?.addFrame(frame)
         val now = System.currentTimeMillis()
-        if (photoWanted && now - camStartedAt > 1500) {
+        lastRot = frame.rotation
+        if (photoWanted && !photoBusy && now - camStartedAt > 1500 && wantFullPhoto() && !fullFailed) {
+            // Bigger than the video: pause the video for a moment and take it straight from the camera.
+            photoBusy = true
+            h.post { fullPhoto() }
+        } else if (photoWanted && !photoBusy && now - camStartedAt > 1500) {
             photoWanted = false
+            fullFailed = false
             val i420 = frame.buffer.toI420()
             val rot = frame.rotation
             if (i420 != null) {
@@ -406,7 +431,7 @@ class CameraService : Service() {
                     y.get(g, row * 64, 64)
                 }
                 i.release()
-                checkMotion(g)
+                checkMotion(g, frame.rotation)
             }
         }
     }
@@ -414,16 +439,55 @@ class CameraService : Service() {
     // ---------------------------------------------------------------- motion
 
     /** Same rule as the web camera page: count pixels that changed, ignore whole-picture jumps (light). */
-    private fun checkMotion(g: ByteArray) {
+    private fun checkMotion(g: ByteArray, rot: Int) {
         val prev = prevSmall
         prevSmall = g
         if (prev == null) return
+        val m = mask(rot)
         var n = 0
-        for (k in g.indices) if (abs((g[k].toInt() and 255) - (prev[k].toInt() and 255)) > 22) n++
-        val ratio = n.toDouble() / g.size
+        var all = 0
+        for (k in g.indices) if (abs((g[k].toInt() and 255) - (prev[k].toInt() and 255)) > 22) {
+            all++
+            if (m == null || m[k]) n++
+        }
+        val ratio = n.toDouble() / (if (m == null) g.size else maxOf(1, zoneCount))
         val need = 0.002 + (100 - settings.optInt("sens", 50)) / 100.0 * 0.06
-        if (ratio > need && ratio < 0.6) hits++ else hits = 0
+        // A big jump across the whole picture is the camera adjusting to light, not motion.
+        if (ratio > need && all.toDouble() / g.size < 0.6) hits++ else hits = 0
         if (hits >= 2) h.post { onMotion() }
+    }
+
+    /**
+     * The motion area: "zones" is 6 rows of 8 cells over the upright picture, '1' = watch.
+     * Returns which of the 64x48 comparison pixels count (null = all of them).
+     */
+    private fun mask(rot: Int): BooleanArray? {
+        val z = settings.optString("zones", "")
+        if (z.length != 48 || !z.contains('0') || !z.contains('1')) return null
+        val key = "$z/$rot"
+        if (key == zoneKey) return zoneMask
+        val m = BooleanArray(64 * 48)
+        var n = 0
+        for (sy in 0 until 48) for (sx in 0 until 64) {
+            val fx = (sx + 0.5f) / 64
+            val fy = (sy + 0.5f) / 48
+            // The frame is as the sensor sees it; turn the point to where it is in the upright picture.
+            val u: Float
+            val v: Float
+            when (((rot % 360) + 360) % 360) {
+                90 -> { u = 1 - fy; v = fx }
+                180 -> { u = 1 - fx; v = 1 - fy }
+                270 -> { u = fy; v = 1 - fx }
+                else -> { u = fx; v = fy }
+            }
+            val on = z[minOf(5, (v * 6).toInt()) * 8 + minOf(7, (u * 8).toInt())] == '1'
+            m[sy * 64 + sx] = on
+            if (on) n++
+        }
+        zoneKey = key
+        zoneMask = m
+        zoneCount = n
+        return m
     }
 
     private fun onMotion() {
@@ -500,6 +564,106 @@ class CameraService : Service() {
             finishRecording()
         }
         if (r !== rec) report()
+    }
+
+    /** True when the photo setting asks for more than the video's size. */
+    private fun wantFullPhoto(): Boolean {
+        val want = when (settings.optString("photo", "max")) { "1080" -> 1920; "720" -> 1280; else -> 0 }
+        return want == 0 || want > res() * 16 / 9
+    }
+
+    /** Pause the video, take one photo at the camera's own size, and carry on. (Service thread.) */
+    private fun fullPhoto() {
+        val cap = capturer
+        if (cap == null || camDev.isEmpty()) { photoBusy = false; return }
+        val dev = camDev
+        val rot = lastRot
+        val torch = wantTorch()
+        val maxW = when (settings.optString("photo", "max")) { "1080" -> 1920; "720" -> 1280; else -> 0 }
+        try { cap.stopCapture() } catch (e: Exception) { Log.w(TAG, "pause for photo: $e") }
+        torchOn = false
+        Thread {
+            val bytes = try { Still.capture(applicationContext, dev, maxW, rot, torch) } catch (e: Exception) { Log.w(TAG, "photo: $e"); null }
+            h.post {
+                if (capturer === cap) {
+                    try {
+                        val r = res()
+                        cap.startCapture(r * 16 / 9 / 2 * 2, r, fps())
+                        camStartedAt = System.currentTimeMillis()
+                    } catch (e: Exception) {
+                        problem = "Camera could not restart after the photo: ${e.message}"
+                        Log.w(TAG, "resume after photo: $e")
+                    }
+                }
+                if (bytes != null) {
+                    val now = System.currentTimeMillis()
+                    val f = File(uploader.dir, "photo-$now.jpg")
+                    try {
+                        f.writeBytes(bytes)
+                        uploader.add(f, "photo", stamp(now), 0, "jpg")
+                    } catch (e: Exception) {
+                        Log.w(TAG, "save photo: $e")
+                    }
+                    photoWanted = false
+                } else {
+                    // Couldn't: the next video frame is used instead.
+                    fullFailed = true
+                }
+                photoBusy = false
+                update()
+            }
+        }.start()
+    }
+
+    // ---------------------------------------------------------------- torch
+
+    private fun wantTorch() = settings.optBoolean("torch", false) || torchCmd
+
+    private fun field(c: Class<*>, o: Any, name: String): Any? {
+        var k: Class<*>? = c
+        while (k != null) {
+            try {
+                val f = k.getDeclaredField(name)
+                f.isAccessible = true
+                return f.get(o)
+            } catch (_: NoSuchFieldException) {
+                k = k.superclass
+            }
+        }
+        return null
+    }
+
+    /**
+     * Switch the phone's light on or off while the video capture keeps running.
+     * The video library has no torch control, so this reaches into its camera
+     * session and re-sends the capture request with the light set. (Service thread.)
+     */
+    private fun applyTorch() {
+        val cap = capturer ?: return
+        val on = wantTorch()
+        try {
+            val session = field(cap.javaClass, cap, "currentSession") ?: return
+            val sc = session.javaClass
+            val cs = field(sc, session, "captureSession") as? CameraCaptureSession ?: return
+            val dev = field(sc, session, "cameraDevice") as? CameraDevice ?: return
+            val surface = field(sc, session, "surface") as? Surface ?: return
+            val handler = field(sc, session, "cameraThreadHandler") as? Handler
+            val fmt = field(sc, session, "captureFormat") as? CameraEnumerationAndroid.CaptureFormat
+            val unit = maxOf(1, (field(sc, session, "fpsUnitFactor") as? Int) ?: 1)
+            val b = dev.createCaptureRequest(CameraDevice.TEMPLATE_RECORD)
+            b.set(CaptureRequest.FLASH_MODE, if (on) CaptureRequest.FLASH_MODE_TORCH else CaptureRequest.FLASH_MODE_OFF)
+            if (fmt != null) b.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, Range(fmt.framerate.min / unit, fmt.framerate.max / unit))
+            b.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
+            b.set(CaptureRequest.CONTROL_AE_LOCK, false)
+            b.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_VIDEO)
+            b.addTarget(surface)
+            cs.setRepeatingRequest(b.build(), null, handler)
+            torchOn = on
+        } catch (e: Exception) {
+            Log.w(TAG, "torch: $e")
+            torchOn = false
+        }
+        report()
     }
 
     private fun savePhoto(b: VideoFrame.I420Buffer, rotation: Int) {
@@ -757,7 +921,7 @@ class CameraService : Service() {
                 "record" -> if (m.optBoolean("stop")) finishRecording() else startRecording(m.optInt("seconds", 30).coerceIn(5, 3600), true)
                 "photo" -> { photoWanted = true; update() }
                 "talk" -> setTalk(m.optBoolean("on"))
-                "torch" -> {}
+                "torch" -> { torchCmd = m.optBoolean("on"); if (videoTrack != null) applyTorch() }
                 "removed" -> {
                     stopped = true
                     cfg.unlink()
@@ -782,6 +946,7 @@ class CameraService : Service() {
         motionOn = settings.optBoolean("motion", false)
         if (!motionOn) { prevSmall = null; hits = 0 }
         update()
+        if (videoTrack != null && wantTorch() != torchOn) applyTorch()
     }
 
     @SuppressLint("UnspecifiedRegisterReceiverFlag")
@@ -798,6 +963,8 @@ class CameraService : Service() {
             .put("motion_on", motionOn)
             .put("camera", if (videoTrack != null) "on" else "off")
             .put("res", res())
+            .put("torch", torchOn)
+            .put("extras", 1)
             .put("app", true)
             .put("app_version", BuildConfig.VERSION_NAME)
             .put("waiting", uploader.waiting()))
@@ -807,6 +974,7 @@ class CameraService : Service() {
         if (rec != null) parts.add("recording")
         if (motionOn) parts.add("motion detection on")
         if (talkPc != null) parts.add("talk")
+        if (torchOn) parts.add("torch on")
         if (videoTrack != null) parts.add("camera on")
         val w = uploader.waiting()
         if (w > 0) parts.add("$w waiting to upload")
