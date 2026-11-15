@@ -172,10 +172,17 @@ object Vpn {
         changed()
     }
 
-    /** Can the router be reached (through whatever route the phone has now)? */
-    private fun answers(router: String, tries: Int): Boolean {
-        repeat(tries) {
-            try { Socket().use { it.connect(InetSocketAddress(router, 443), 3000) }; return true } catch (_: Exception) {}
+    /**
+     * Has home accepted this phone's link? Only a completed WireGuard handshake proves it: reaching
+     * the router proves nothing (at home it answers over Wi-Fi whether or not the link is allowed).
+     */
+    private fun handshake(ctx: Context, s: Store, seconds: Int): Boolean {
+        val home = try { com.wireguard.crypto.Key.fromBase64(s.serverPub) } catch (_: Exception) { return false }
+        repeat(seconds) {
+            try {
+                val stats = backend(ctx).getStatistics(tunnel).peer(home)
+                if (stats != null && stats.latestHandshakeEpochMillis() > 0) return true
+            } catch (_: Exception) {}
             Thread.sleep(1000)
         }
         return false
@@ -189,15 +196,18 @@ object Vpn {
      */
     private fun stillWaiting(ctx: Context, s: Store): Boolean {
         if (!s.pending) { waiting = false; return false }
-        try { Updater.hello(s); if (!s.pending) { waiting = false; return false } } catch (_: Exception) {}
+        // Home answers directly (at home): its word decides.
+        var asked = false
+        try { Updater.hello(s); asked = true; if (!s.pending) { waiting = false; return false } } catch (_: Exception) {}
         val now = System.currentTimeMillis()
-        if (now - lastTrial > 4 * 60_000) {
+        // Home can't be asked (away): a trial link, judged only by its handshake.
+        if (!asked && now - lastTrial > 4 * 60_000) {
             lastTrial = now
             val ip = lookup(ctx, s.host) ?: s.lastIp.ifEmpty { null }
             if (ip != null) {
                 try {
                     backend(ctx).setState(tunnel, Tunnel.State.UP, config(s, ip, dns = false))
-                    if (answers(s.router, 8)) { s.pending = false; waiting = false; return false }
+                    if (handshake(ctx, s, 10)) { s.pending = false; waiting = false; return false }
                 } catch (_: Exception) {}
             }
         }

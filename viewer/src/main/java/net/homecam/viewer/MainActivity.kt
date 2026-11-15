@@ -326,8 +326,6 @@ class MainActivity : Activity() {
             runOnUiThread {
                 probing = false
                 reach = if (ok) "yes" else "no"
-                // Home answering through the link means it has been allowed.
-                if (ok) cfg.pending = false
                 refresh()
                 // Look again in a while, so the line stays true.
                 window.decorView.postDelayed({ if (!probing) { reach = ""; refresh() } }, 20_000)

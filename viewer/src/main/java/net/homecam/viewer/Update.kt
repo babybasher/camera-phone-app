@@ -53,6 +53,8 @@ object Updater {
     fun leave(s: Store): Boolean {
         if (s.leave.isEmpty()) return false
         val c = open(s, "/api/vpn/leave")
+        c.connectTimeout = 5_000
+        c.readTimeout = 6_000
         return try {
             c.requestMethod = "POST"
             c.doOutput = true
