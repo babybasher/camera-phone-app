@@ -37,13 +37,14 @@ object Updater {
             c.requestMethod = "POST"
             c.doOutput = true
             c.setRequestProperty("Content-Type", "application/json")
-            c.outputStream.use { it.write(JSONObject().put("version", BuildConfig.VERSION_CODE).toString().toByteArray()) }
+            c.outputStream.use { it.write(JSONObject().put("version", BuildConfig.VERSION_CODE).put("leave", s.leave).toString().toByteArray()) }
             val status = c.responseCode
             if (status == 404) throw IOException("the camera system needs a newer update before it can offer app updates")
             if (status == 403) throw IOException("the router doesn't see this phone as linked; turn the link on and try again")
             if (status !in 200..299) throw IOException("the router answered $status")
             val j = JSONObject(c.inputStream.bufferedReader().use { it.readText() })
             latest = j.optInt("latest", 0)
+            s.pending = j.optBoolean("pending", false)
             return latest
         } finally { c.disconnect() }
     }

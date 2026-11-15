@@ -117,6 +117,7 @@ class MainActivity : Activity() {
             cfg.page = j.getString("page")
             cfg.api = api
             cfg.leave = j.optString("leave")
+            cfg.pending = j.optBoolean("pending", false)
         } finally { c.disconnect() }
     }
 
@@ -290,6 +291,7 @@ class MainActivity : Activity() {
             !cfg.enabled -> "The link is off."
             !on -> "Starting the link..."
             reach == "yes" -> "The link is on and home is answering."
+            cfg.pending -> "Waiting for approval. Ask the owner to allow this phone on the camera page (Remote viewing). It starts working by itself once allowed."
             reach == "no" -> "The link is on, but home isn't answering right now."
             else -> "The link is on. Checking home..."
         }
@@ -312,6 +314,8 @@ class MainActivity : Activity() {
             runOnUiThread {
                 probing = false
                 reach = if (ok) "yes" else "no"
+                // Home answering through the link means it has been allowed.
+                if (ok) cfg.pending = false
                 refresh()
                 // Look again in a while, so the line stays true.
                 window.decorView.postDelayed({ if (!probing) { reach = ""; refresh() } }, 20_000)

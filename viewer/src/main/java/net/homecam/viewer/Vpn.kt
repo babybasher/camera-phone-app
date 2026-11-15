@@ -42,6 +42,8 @@ class Store(ctx: Context) {
     var api: String get() = s("api").ifEmpty { "https://$host:1987" }; set(v) = put("api", v)
     /** The word that lets this phone take itself off home's device list when it unlinks. */
     var leave: String get() = s("leave"); set(v) = put("leave", v)
+    /** Home hasn't allowed this phone yet (the owner does that on the Remote viewing page). */
+    var pending: Boolean get() = p.getBoolean("pending", false); set(v) = p.edit().putBoolean("pending", v).apply()
     /** The camera page. */
     var page: String get() = s("page"); set(v) = put("page", v)
     /** Home's internet address when last seen (used if the name can't be looked up). */
