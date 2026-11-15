@@ -93,6 +93,8 @@ class MainActivity : Activity() {
         val keys = KeyPair()
         val body = JSONObject().put("code", code).put("pub", keys.publicKey.toBase64())
             .put("name", (Build.MANUFACTURER.replaceFirstChar { it.uppercase() } + " " + Build.MODEL).take(40))
+        val home = Home(this)
+        if (home.oldLeave.isNotEmpty()) body.put("replaces", home.oldLeave)
         val c = URL("$api/api/vpn/join").openConnection() as HttpURLConnection
         try {
             c.connectTimeout = 10_000
@@ -118,6 +120,8 @@ class MainActivity : Activity() {
             cfg.api = api
             cfg.leave = j.optString("leave")
             cfg.pending = j.optBoolean("pending", false)
+            home.oldLeave = ""
+            home.page = cfg.page
         } finally { c.disconnect() }
     }
 
@@ -195,6 +199,10 @@ class MainActivity : Activity() {
                 addView(text("To set it up: while at home on your Wi-Fi, open the camera page on this phone, tap Remote viewing, then tap \"Set up this phone\".", 15f, muted))
                 if (message.isNotEmpty()) addView(text(message, 15f, warn))
                 message = ""
+                val page = Home(this@MainActivity).page
+                if (page.isNotEmpty()) addView(button("Open Remote viewing", primary = true) {
+                    try { startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(page.trimEnd('/') + "/remote.html"))) } catch (_: Exception) {}
+                })
                 addView(text("Camera Link ${BuildConfig.VERSION_NAME}", 12f, muted))
             }
             return
@@ -236,9 +244,13 @@ class MainActivity : Activity() {
             val told = Updater.leave(cfg)
             runOnUiThread {
                 Vpn.down(this)
+                val home = Home(this)
+                if (cfg.page.isNotEmpty()) home.page = cfg.page
+                // Home couldn't be told: the next setup replaces the old entry instead of adding another.
+                if (!told && cfg.leave.isNotEmpty()) home.oldLeave = cfg.leave
                 cfg.clear()
                 message = if (told) "The link is removed, and home has taken this phone off its list."
-                    else "The link is removed from this phone. Home couldn't be told, so also remove this phone under Remote viewing on the camera page."
+                    else "The link is removed from this phone. Home couldn't be told right now; setting up again replaces the old entry, or remove it under Remote viewing on the camera page."
                 show()
             }
         }.start()
@@ -289,9 +301,9 @@ class MainActivity : Activity() {
         val on = cfg.enabled && Vpn.state == Tunnel.State.UP
         statusView?.text = when {
             !cfg.enabled -> "The link is off."
+            cfg.pending || Vpn.waiting -> "Waiting for approval. Ask the owner to allow this phone on the camera page (Remote viewing). At home the cameras work as normal meanwhile; away from home it starts working by itself once allowed."
             !on -> "Starting the link..."
             reach == "yes" -> "The link is on and home is answering."
-            cfg.pending -> "Waiting for approval. Ask the owner to allow this phone on the camera page (Remote viewing). It starts working by itself once allowed."
             reach == "no" -> "The link is on, but home isn't answering right now."
             else -> "The link is on. Checking home..."
         }

@@ -19,6 +19,8 @@ import com.wireguard.config.Interface
 import com.wireguard.config.Peer
 import java.net.Inet4Address
 import java.net.InetAddress
+import java.net.Socket
+import java.net.InetSocketAddress
 import java.util.concurrent.Executors
 
 /** What this phone needs to reach home. Kept in the app's private storage. */
@@ -54,6 +56,15 @@ class Store(ctx: Context) {
     val ready get() = privateKey.isNotEmpty() && serverPub.isNotEmpty() && host.isNotEmpty() && lan.isNotEmpty()
 
     fun clear() = p.edit().clear().apply()
+}
+
+/** Kept when the link is removed: where home is, and (if home couldn't be told) the old link to replace. */
+class Home(ctx: Context) {
+    private val p = ctx.getSharedPreferences("home", Context.MODE_PRIVATE)
+    /** The camera page, e.g. https://name.duckdns.org/ */
+    var page: String get() = p.getString("page", "") ?: ""; set(v) = p.edit().putString("page", v).apply()
+    /** The private word of a link removed while home couldn't be reached: the next setup replaces it. */
+    var oldLeave: String get() = p.getString("oldLeave", "") ?: ""; set(v) = p.edit().putString("oldLeave", v).apply()
 }
 
 /**
@@ -128,10 +139,17 @@ object Vpn {
         return (addr and mask) == (base and mask)
     }
 
-    private fun config(s: Store, ip: String): Config {
+    /** The link is held off because home hasn't allowed this phone yet. */
+    @Volatile var waiting = false
+    private var lastTrial = 0L
+
+    private fun config(s: Store, ip: String, dns: Boolean = true): Config {
         // Only the home network goes through the link. Names are looked up by the home router (as the
         // WireGuard app does), because it knows the camera page's name means the router itself.
-        val me = Interface.Builder().parsePrivateKey(s.privateKey).parseAddresses(s.address + "/32").parseDnsServers(s.router).build()
+        // (A trial link while waiting for approval leaves name lookups alone.)
+        val b = Interface.Builder().parsePrivateKey(s.privateKey).parseAddresses(s.address + "/32")
+        if (dns) b.parseDnsServers(s.router)
+        val me = b.build()
         val home = Peer.Builder().parsePublicKey(s.serverPub).parseEndpoint(ip + ":" + s.port).parseAllowedIPs(s.lan).build()
         return Config.Builder().setInterface(me).addPeer(home).build()
     }
@@ -154,13 +172,50 @@ object Vpn {
         changed()
     }
 
+    /** Can the router be reached (through whatever route the phone has now)? */
+    private fun answers(router: String, tries: Int): Boolean {
+        repeat(tries) {
+            try { Socket().use { it.connect(InetSocketAddress(router, 443), 3000) }; return true } catch (_: Exception) {}
+            Thread.sleep(1000)
+        }
+        return false
+    }
+
+    /**
+     * While home hasn't allowed this phone, the link stays off: a link that can't connect would swallow
+     * the home network and every name lookup, so even the camera page at home wouldn't load. Home is
+     * asked directly (works at home); away from home, a trial link without name lookups is tried every
+     * few minutes. Returns true while still waiting.
+     */
+    private fun stillWaiting(ctx: Context, s: Store): Boolean {
+        if (!s.pending) { waiting = false; return false }
+        try { Updater.hello(s); if (!s.pending) { waiting = false; return false } } catch (_: Exception) {}
+        val now = System.currentTimeMillis()
+        if (now - lastTrial > 4 * 60_000) {
+            lastTrial = now
+            val ip = lookup(ctx, s.host) ?: s.lastIp.ifEmpty { null }
+            if (ip != null) {
+                try {
+                    backend(ctx).setState(tunnel, Tunnel.State.UP, config(s, ip, dns = false))
+                    if (answers(s.router, 8)) { s.pending = false; waiting = false; return false }
+                } catch (_: Exception) {}
+            }
+        }
+        try { backend(ctx).setState(tunnel, Tunnel.State.DOWN, null) } catch (_: Exception) {}
+        builtFor = ""
+        state = Tunnel.State.DOWN
+        waiting = true
+        changed()
+        return true
+    }
+
     /** Turn the link on (the user has already allowed it). */
     fun up(ctx: Context, done: (() -> Unit)? = null) {
         val app = ctx.applicationContext
         work.execute {
             try {
                 val s = Store(app)
-                if (s.ready && VpnService.prepare(app) == null) bring(app, s, null)
+                if (s.ready && VpnService.prepare(app) == null && !stillWaiting(app, s)) bring(app, s, null)
             } finally { done?.invoke() }
         }
     }
@@ -183,6 +238,7 @@ object Vpn {
             val s = Store(app)
             if (!s.ready || !s.enabled) return@execute
             if (VpnService.prepare(app) != null) return@execute
+            if (stillWaiting(app, s)) return@execute
             val running = try { backend(app).getState(tunnel) == Tunnel.State.UP } catch (_: Exception) { false }
             val ip = lookup(app, s.host)
             if (!running) bring(app, s, ip)
