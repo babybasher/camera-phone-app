@@ -141,6 +141,8 @@ object Vpn {
 
     /** The link is held off because home hasn't allowed this phone yet. */
     @Volatile var waiting = false
+    /** Home answered the last time it was asked directly (so checking often is cheap). */
+    @Volatile var homeAnswers = false
     private var lastTrial = 0L
 
     private fun config(s: Store, ip: String, dns: Boolean = true): Config {
@@ -199,6 +201,7 @@ object Vpn {
         // Home answers directly (at home): its word decides.
         var asked = false
         try { Updater.hello(s); asked = true; if (!s.pending) { waiting = false; return false } } catch (_: Exception) {}
+        homeAnswers = asked
         val now = System.currentTimeMillis()
         // Home can't be asked (away): a trial link, judged only by its handshake.
         if (!asked && now - lastTrial > 4 * 60_000) {
@@ -264,8 +267,8 @@ class ViewerApp : Application() {
     private val tick = object : Runnable {
         override fun run() {
             Vpn.check(this@ViewerApp)
-            // While waiting for approval, ask home every 15 s so the link comes on soon after it's allowed.
-            main.postDelayed(this, if (Vpn.waiting) 15_000 else 180_000)
+            // While waiting for approval at home, ask every 15 s so the link comes on soon after it's allowed.
+            main.postDelayed(this, if (Vpn.waiting && Vpn.homeAnswers) 15_000 else 180_000)
         }
     }
 
