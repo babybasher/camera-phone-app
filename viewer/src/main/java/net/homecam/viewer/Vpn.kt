@@ -264,7 +264,8 @@ class ViewerApp : Application() {
     private val tick = object : Runnable {
         override fun run() {
             Vpn.check(this@ViewerApp)
-            main.postDelayed(this, 180_000)
+            // While waiting for approval, ask home every 15 s so the link comes on soon after it's allowed.
+            main.postDelayed(this, if (Vpn.waiting) 15_000 else 180_000)
         }
     }
 
