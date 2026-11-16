@@ -156,6 +156,12 @@ object Vpn {
         return Config.Builder().setInterface(me).addPeer(home).build()
     }
 
+    /**
+     * Start the link, but only keep it if home answers through it. A link that can't reach home would
+     * swallow the home network and every name lookup (at home that means no internet at all on the
+     * phone), so it is tried first without name lookups, then switched to the full link once home has
+     * answered. If home doesn't answer, the link stays off and is tried again at the next check.
+     */
     private fun bring(ctx: Context, s: Store, known: String?) {
         val ip = known ?: lookup(ctx, s.host) ?: s.lastIp.ifEmpty { null }
         if (ip == null) {
@@ -164,6 +170,15 @@ object Vpn {
             return
         }
         try {
+            backend(ctx).setState(tunnel, Tunnel.State.UP, config(s, ip, dns = false))
+            if (!alive(ctx, s)) {
+                backend(ctx).setState(tunnel, Tunnel.State.DOWN, null)
+                builtFor = ""
+                state = Tunnel.State.DOWN
+                problem = "Home isn't answering right now. The link tries again in a few minutes; the phone works normally meanwhile."
+                changed()
+                return
+            }
             backend(ctx).setState(tunnel, Tunnel.State.UP, config(s, ip))
             builtFor = ip
             s.lastIp = ip
@@ -172,6 +187,27 @@ object Vpn {
             problem = "Could not start the link: " + (if (e is BackendException) e.reason.name else (e.message ?: e.toString()))
         }
         changed()
+    }
+
+    /**
+     * Is home answering through the running link? Something is sent to the router (which makes
+     * WireGuard shake hands if it hasn't lately), then a recent handshake proves home is there.
+     */
+    private fun alive(ctx: Context, s: Store): Boolean {
+        try {
+            Socket().use { it.connect(InetSocketAddress(s.router, 443), 4000) }
+            return true
+        } catch (_: Exception) {}
+        val home = try { com.wireguard.crypto.Key.fromBase64(s.serverPub) } catch (_: Exception) { return false }
+        repeat(6) {
+            try {
+                val stats = backend(ctx).getStatistics(tunnel).peer(home)
+                val at = stats?.latestHandshakeEpochMillis() ?: 0L
+                if (at > 0 && System.currentTimeMillis() - at < 180_000) return true
+            } catch (_: Exception) {}
+            Thread.sleep(1000)
+        }
+        return false
     }
 
     /**
@@ -252,7 +288,15 @@ object Vpn {
             if (!s.ready || !s.enabled) return@execute
             if (VpnService.prepare(app) != null) return@execute
             if (stillWaiting(app, s)) return@execute
-            val running = try { backend(app).getState(tunnel) == Tunnel.State.UP } catch (_: Exception) { false }
+            var running = try { backend(app).getState(tunnel) == Tunnel.State.UP } catch (_: Exception) { false }
+            if (running && !alive(app, s)) {
+                // Home stopped answering (for example the camera system is restarting): let go of the
+                // home network rather than swallow it, and try again shortly.
+                try { backend(app).setState(tunnel, Tunnel.State.DOWN, null) } catch (_: Exception) {}
+                builtFor = ""
+                state = Tunnel.State.DOWN
+                running = false
+            }
             val ip = lookup(app, s.host)
             if (!running) bring(app, s, ip)
             else if (ip != null && ip != builtFor) bring(app, s, ip)
@@ -268,7 +312,13 @@ class ViewerApp : Application() {
         override fun run() {
             Vpn.check(this@ViewerApp)
             // While waiting for approval at home, ask every 15 s so the link comes on soon after it's allowed.
-            main.postDelayed(this, if (Vpn.waiting && Vpn.homeAnswers) 15_000 else 180_000)
+            // While home isn't answering, try again every minute.
+            val next = when {
+                Vpn.waiting && Vpn.homeAnswers -> 15_000L
+                !Vpn.waiting && Vpn.state != Tunnel.State.UP -> 60_000L
+                else -> 180_000L
+            }
+            main.postDelayed(this, next)
         }
     }
 
