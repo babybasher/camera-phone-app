@@ -5,6 +5,11 @@ on:
   workflow_dispatch:
 permissions:
   contents: write
+# One build at a time: two at once race to publish and the second fails.
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
 jobs:
   build:
     runs-on: ubuntu-latest
