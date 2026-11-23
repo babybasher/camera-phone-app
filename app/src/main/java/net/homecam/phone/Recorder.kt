@@ -22,6 +22,8 @@ class Recorder(
     private val bitrate: Int,
     private val audioRate: Int,
     private val audioChannels: Int,
+    /** Largest short side to record at (e.g. 720 for 720p); 0 = the camera's own size. */
+    private val maxSide: Int = 0,
 ) {
     private val thread = HandlerThread("rec").apply { start() }
     private val h = Handler(thread.looper)
@@ -42,6 +44,8 @@ class Recorder(
     private val info = MediaCodec.BufferInfo()
     private val frameGapNs = 1_000_000_000L / fps.coerceAtLeast(1)
     private var lastFrameNs = 0L
+    private var rawW = 0
+    private var rawH = 0
 
     init {
         if (withAudio) {
@@ -63,9 +67,19 @@ class Recorder(
         if (now - lastFrameNs < frameGapNs * 8 / 10) return
         lastFrameNs = now
         val buf = frame.buffer
-        if (width != 0 && (buf.width != width || buf.height != height)) return
+        // One size per file: frames of another size (the camera restarting) are left out.
+        if (rawW == 0) { rawW = buf.width; rawH = buf.height }
+        if (buf.width != rawW || buf.height != rawH) return
         val rotation = frame.rotation
-        val i420 = buf.toI420() ?: return
+        // Smaller than the camera's picture when asked (Long record's picture size).
+        val short = minOf(buf.width, buf.height)
+        val i420 = if (maxSide in 1 until short) {
+            val tw = (buf.width * maxSide / short) / 2 * 2
+            val th = (buf.height * maxSide / short) / 2 * 2
+            val scaled = buf.cropAndScale(0, 0, buf.width, buf.height, tw, th)
+            try { scaled.toI420() } finally { scaled.release() }
+        } else buf.toI420()
+        if (i420 == null) return
         h.post {
             try {
                 if (!finished) {

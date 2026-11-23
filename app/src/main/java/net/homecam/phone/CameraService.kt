@@ -142,6 +142,7 @@ class CameraService : Service() {
     private var longFps = 0
     private var longQuality = "normal"
     private var longSound = false    // record sound too (needs the camera's microphone on)
+    private var longDropped = 0      // unlimited: oldest unsent blocks deleted to make room
     private var longError = ""
     private var recLong = false      // the recording running now is a long-record block
 
@@ -575,18 +576,21 @@ class CameraService : Service() {
             longId = id; longUntil = until
             longFps = p.getInt("fps", 0); longQuality = p.getString("quality", "normal") ?: "normal"
             longSound = p.getBoolean("sound", false)
+            longDropped = p.getInt("dropped", 0)
             Log.i(TAG, "long record carries on until $until")
         } else if (id.isNotEmpty()) {
             p.edit().clear().apply()
         }
     }
 
+    /** hours <= 0: until someone stops it. */
     private fun startLong(hours: Double, fps: Int, quality: String, sound: Boolean) {
         if (longActive()) return
         if (rec != null) finishRecording()
         val now = System.currentTimeMillis()
         longId = SimpleDateFormat("yyyyMMddHHmmss", Locale.US).format(Date(now))
-        longUntil = now + (hours.coerceIn(0.25, 48.0) * 3_600_000).toLong()
+        longUntil = if (hours <= 0) Long.MAX_VALUE else now + (hours.coerceIn(0.25, 48.0) * 3_600_000).toLong()
+        longDropped = 0
         longFps = fps.coerceIn(1, 30)
         longQuality = if (quality in listOf("low", "normal", "high")) quality else "normal"
         longSound = sound
@@ -612,17 +616,19 @@ class CameraService : Service() {
     /** Frames per second for the blocks: the chosen rate, never more than the camera gives. */
     private fun longRate() = (if (longFps > 0) longFps else fps()).coerceAtMost(fps()).coerceAtLeast(1)
 
-    /** Bits per second: the camera's usual rate scaled to the frame rate, then by quality. */
+    /** Picture size: low = 480p, normal = 720p, high = 1080p, never more than the camera's own. */
+    private fun longSide() = minOf(when (longQuality) { "low" -> 480; "high" -> 1080; else -> 720 }, res())
+
+    /** Bits per second for that picture size at 15 a second, scaled to the frame rate. */
     private fun longBitrate(): Int {
-        val perFrame = bitrate() / 15.0
-        val q = when (longQuality) { "low" -> 0.5; "high" -> 1.6; else -> 1.0 }
-        return (perFrame * maxOf(longRate(), 3) * q).toInt().coerceAtLeast(200_000)
+        val perFrame = (when (longSide()) { 360 -> 700_000; 480 -> 1_200_000; 1080 -> 4_500_000; else -> 2_500_000 }) / 15.0
+        return (perFrame * maxOf(longRate(), 3)).toInt().coerceAtLeast(200_000)
     }
 
-    /** Room on the phone for another block (plus a margin), with the queue that's waiting. */
+    /** Room on the phone for another block, keeping 1 GB spare. */
     private fun roomForBlock(): Boolean {
         val block = (longBitrate().toLong() + (if (longSound) 64_000 else 0)) / 8 * 600
-        return uploader.dir.usableSpace > block + 200L * 1024 * 1024
+        return uploader.dir.usableSpace > block + 1024L * 1024 * 1024
     }
 
     private fun startLongBlock() {
@@ -632,7 +638,7 @@ class CameraService : Service() {
         try {
             // Sound when asked for and the microphone is sending it (the camera's Microphone setting).
             val withAudio = longSound && mic() && audioRate > 0 && now - lastAudioAt < 3000
-            rec = Recorder(f, longRate(), longBitrate(), if (withAudio) audioRate else 0, audioChannels)
+            rec = Recorder(f, longRate(), longBitrate(), if (withAudio) audioRate else 0, audioChannels, longSide())
             recStarted = now
             recFile = f
             recStamp = stamp(now)
@@ -655,8 +661,14 @@ class CameraService : Service() {
         }
         if (rec == null && videoTrack != null) {
             if (!roomForBlock()) {
-                stopLong("Long record stopped: the phone ran out of space, because it couldn't send the recordings (no Wi-Fi?). They send once it's back on Wi-Fi.")
-                return
+                // Unlimited: keep the newest hours. Delete the oldest unsent blocks to make room.
+                while (longUntil == Long.MAX_VALUE && !roomForBlock() && uploader.dropOldest("long-")) longDropped++
+                if (!roomForBlock()) {
+                    stopLong("Long record stopped: the phone ran out of space, because it couldn't send the recordings (no Wi-Fi?). They send once it's back on Wi-Fi.")
+                    return
+                }
+                Log.i(TAG, "long record: dropped the oldest unsent blocks to make room ($longDropped so far)")
+                longPrefs().edit().putInt("dropped", longDropped).apply()
             }
             startLongBlock()
         }
@@ -1088,14 +1100,15 @@ class CameraService : Service() {
             .put("waiting", uploader.waiting())
             .put("upload_error", if (uploader.waiting() > 0) uploader.lastError else "")
             .put("fps", fps())
-            .put("long", if (longActive()) JSONObject().put("id", longId).put("until", longUntil).put("fps", longRate())
+            .put("long", if (longActive()) JSONObject().put("id", longId).put("until", if (longUntil == Long.MAX_VALUE) 0L else longUntil)
+                .put("unlimited", longUntil == Long.MAX_VALUE).put("dropped", longDropped).put("size", longSide()).put("fps", longRate())
                 .put("quality", longQuality).put("sound", longSound).put("block_started", if (recLong) recStarted else 0L) else JSONObject.NULL)
             .put("mic", mic())
             .put("long_error", longError))
         val parts = ArrayList<String>()
         parts.add(if (linked) "Connected to the router" else "Not connected")
         if (wantStream && pubState == "CONNECTED") parts.add("someone is watching")
-        if (longActive()) parts.add("long record until " + SimpleDateFormat("h:mm a", Locale.US).format(Date(longUntil)))
+        if (longActive()) parts.add(if (longUntil == Long.MAX_VALUE) "long record (until stopped)" else "long record until " + SimpleDateFormat("h:mm a", Locale.US).format(Date(longUntil)))
         else if (rec != null) parts.add("recording")
         if (motionOn) parts.add("motion detection on")
         if (talkPc != null) parts.add("talk")
@@ -1135,6 +1148,15 @@ class Uploader(ctx: Context, private val cfg: Prefs, private val changed: () -> 
     }
 
     fun waiting() = dir.listFiles { f -> f.name.endsWith(".json") }?.size ?: 0
+
+    /** Delete the oldest waiting file whose name starts with `prefix` (and its details). True if one went. */
+    @Synchronized fun dropOldest(prefix: String): Boolean {
+        val meta = dir.listFiles { f -> f.name.startsWith(prefix) && f.name.endsWith(".json") }?.minByOrNull { it.name } ?: return false
+        File(dir, meta.name.removeSuffix(".json")).delete()
+        meta.delete()
+        changed()
+        return true
+    }
 
     fun add(f: File, kind: String, t: String, secs: Int, ext: String, long: String = "") {
         File(dir, f.name + ".json").writeText(
