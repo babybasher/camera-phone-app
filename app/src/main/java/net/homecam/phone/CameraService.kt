@@ -135,6 +135,15 @@ class CameraService : Service() {
     @Volatile private var audioChannels = 1
     @Volatile private var lastAudioAt = 0L
 
+    // Long record: 10-minute blocks for hours (no sound), each kept in the outbox until it's on
+    // the router's drive. Saved, so it carries on after the app or the phone restarts.
+    private var longId = ""          // yyyyMMddHHmmss of the start: groups the blocks on the router
+    private var longUntil = 0L
+    private var longFps = 0
+    private var longQuality = "normal"
+    private var longError = ""
+    private var recLong = false      // the recording running now is a long-record block
+
     // Motion
     @Volatile private var lastMotionCheck = 0L
     private var prevSmall: ByteArray? = null
@@ -164,6 +173,7 @@ class CameraService : Service() {
         wifi = (applicationContext.getSystemService(WIFI_SERVICE) as WifiManager)
             .createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "homecam:wifi").apply { setReferenceCounted(false); acquire() }
         uploader = Uploader(this, cfg) { changed() }
+        loadLong()
         watchNetwork()
         h.post {
             setupWebrtc()
@@ -295,7 +305,7 @@ class CameraService : Service() {
 
     // ---------------------------------------------------------------- the camera
 
-    private fun needCamera() = wantStream || motionOn || rec != null || photoWanted || thumbWanted
+    private fun needCamera() = wantStream || motionOn || rec != null || photoWanted || thumbWanted || longActive()
     @Volatile private var thumbWanted = true
     private var lastThumb = 0L
 
@@ -508,6 +518,8 @@ class CameraService : Service() {
     private var recManual = false
 
     private fun startRecording(seconds: Int, manual: Boolean = false) {
+        // A long record already records everything.
+        if (longActive()) return
         val now = System.currentTimeMillis()
         if (rec != null) {
             recUntil = maxOf(recUntil, now + seconds * 1000L)
@@ -539,11 +551,109 @@ class CameraService : Service() {
         rec = null
         val f = recFile
         val t = recStamp
+        val long = if (recLong) longId else ""
+        recLong = false
         r.finish { secs ->
-            if (secs > 0 && f != null) uploader.add(f, "clip", t, secs, "mp4")
+            if (secs > 0 && f != null) uploader.add(f, "clip", t, secs, "mp4", long) else f?.delete()
             h.post { update() }
         }
         report()
+    }
+
+    // ---------------------------------------------------------------- long record
+
+    private fun longActive() = longId.isNotEmpty()
+    private fun longPrefs() = getSharedPreferences("long", MODE_PRIVATE)
+
+    private fun loadLong() {
+        val p = longPrefs()
+        val id = p.getString("id", "") ?: ""
+        val until = p.getLong("until", 0L)
+        if (id.isNotEmpty() && until > System.currentTimeMillis()) {
+            longId = id; longUntil = until
+            longFps = p.getInt("fps", 0); longQuality = p.getString("quality", "normal") ?: "normal"
+            Log.i(TAG, "long record carries on until $until")
+        } else if (id.isNotEmpty()) {
+            p.edit().clear().apply()
+        }
+    }
+
+    private fun startLong(hours: Double, fps: Int, quality: String) {
+        if (longActive()) return
+        if (rec != null) finishRecording()
+        val now = System.currentTimeMillis()
+        longId = SimpleDateFormat("yyyyMMddHHmmss", Locale.US).format(Date(now))
+        longUntil = now + (hours.coerceIn(0.25, 48.0) * 3_600_000).toLong()
+        longFps = fps.coerceIn(1, 30)
+        longQuality = if (quality in listOf("low", "normal", "high")) quality else "normal"
+        longError = ""
+        longPrefs().edit().putString("id", longId).putLong("until", longUntil)
+            .putInt("fps", longFps).putString("quality", longQuality).apply()
+        update()
+        tick()
+    }
+
+    /** Stop the long record (why = a message for the page and the screen, or "" when asked to). */
+    private fun stopLong(why: String) {
+        if (!longActive()) return
+        if (rec != null && recLong) finishRecording()
+        longId = ""
+        longUntil = 0L
+        longError = why
+        if (why.isNotEmpty()) problem = why
+        longPrefs().edit().clear().apply()
+        update()
+    }
+
+    /** Frames per second for the blocks: the chosen rate, never more than the camera gives. */
+    private fun longRate() = (if (longFps > 0) longFps else fps()).coerceAtMost(fps()).coerceAtLeast(1)
+
+    /** Bits per second: the camera's usual rate scaled to the frame rate, then by quality. */
+    private fun longBitrate(): Int {
+        val perFrame = bitrate() / 15.0
+        val q = when (longQuality) { "low" -> 0.5; "high" -> 1.6; else -> 1.0 }
+        return (perFrame * maxOf(longRate(), 3) * q).toInt().coerceAtLeast(200_000)
+    }
+
+    /** Room on the phone for another block (plus a margin), with the queue that's waiting. */
+    private fun roomForBlock(): Boolean {
+        val block = longBitrate().toLong() / 8 * 600
+        return uploader.dir.usableSpace > block + 200L * 1024 * 1024
+    }
+
+    private fun startLongBlock() {
+        if (videoTrack == null || rec != null) return
+        val now = System.currentTimeMillis()
+        val f = File(uploader.dir, "long-$now.mp4")
+        try {
+            rec = Recorder(f, longRate(), longBitrate(), 0, audioChannels)
+            recStarted = now
+            recFile = f
+            recStamp = stamp(now)
+            recUntil = longUntil
+            recLong = true
+        } catch (e: Exception) {
+            problem = "Could not record: ${e.message}"
+            Log.w(TAG, "long record: $e")
+        }
+        report()
+    }
+
+    /** Every half second while a long record runs: end, roll over to the next block, or stop when full. */
+    private fun tickLong(now: Long) {
+        if (now >= longUntil) { stopLong(""); return }
+        val r = rec
+        if (r != null && !recLong) finishRecording()
+        if (r != null && recLong && (now - recStarted >= 600_000L || videoTrack == null)) {
+            finishRecording()
+        }
+        if (rec == null && videoTrack != null) {
+            if (!roomForBlock()) {
+                stopLong("Long record stopped: the phone ran out of space, because it couldn't send the recordings (no Wi-Fi?). They send once it's back on Wi-Fi.")
+                return
+            }
+            startLongBlock()
+        }
     }
 
     private fun tick() {
@@ -551,6 +661,7 @@ class CameraService : Service() {
         // Thumbnail for the camera list.
         val gap = if (videoTrack != null) 60_000L else 600_000L
         if (!thumbWanted && cfg.ready && now - lastThumb > gap) { thumbWanted = true; update() }
+        if (longActive()) { tickLong(now); return }
         val r = rec ?: return
         if (now > recUntil || videoTrack == null) { finishRecording(); return }
         if (recManual) {
@@ -918,7 +1029,8 @@ class CameraService : Service() {
                 "settings" -> applySettings(m.optJSONObject("settings") ?: JSONObject())
                 "name" -> { name = m.optString("name"); cfg.name = name; changed() }
                 "stream" -> { wantStream = m.optBoolean("on"); update() }
-                "record" -> if (m.optBoolean("stop")) finishRecording() else startRecording(m.optInt("seconds", 30).coerceIn(5, 3600), true)
+                "record" -> if (m.optBoolean("stop")) { if (!recLong) finishRecording() } else startRecording(m.optInt("seconds", 30).coerceIn(5, 3600), true)
+                "long" -> if (m.optBoolean("stop")) stopLong("") else startLong(m.optDouble("hours", 3.0), m.optInt("fps", 0), m.optString("quality", "normal"))
                 "photo" -> { photoWanted = true; update() }
                 "talk" -> setTalk(m.optBoolean("on"))
                 "torch" -> { torchCmd = m.optBoolean("on"); if (videoTrack != null) applyTorch() }
@@ -967,11 +1079,16 @@ class CameraService : Service() {
             .put("extras", 1)
             .put("app", true)
             .put("app_version", BuildConfig.VERSION_NAME)
-            .put("waiting", uploader.waiting()))
+            .put("waiting", uploader.waiting())
+            .put("fps", fps())
+            .put("long", if (longActive()) JSONObject().put("id", longId).put("until", longUntil).put("fps", longRate())
+                .put("quality", longQuality).put("block_started", if (recLong) recStarted else 0L) else JSONObject.NULL)
+            .put("long_error", longError))
         val parts = ArrayList<String>()
         parts.add(if (linked) "Connected to the router" else "Not connected")
         if (wantStream && pubState == "CONNECTED") parts.add("someone is watching")
-        if (rec != null) parts.add("recording")
+        if (longActive()) parts.add("long record until " + SimpleDateFormat("h:mm a", Locale.US).format(Date(longUntil)))
+        else if (rec != null) parts.add("recording")
         if (motionOn) parts.add("motion detection on")
         if (talkPc != null) parts.add("talk")
         if (torchOn) parts.add("torch on")
@@ -1005,9 +1122,9 @@ class Uploader(ctx: Context, private val cfg: Prefs, private val changed: () -> 
 
     fun waiting() = dir.listFiles { f -> f.name.endsWith(".json") }?.size ?: 0
 
-    fun add(f: File, kind: String, t: String, secs: Int, ext: String) {
+    fun add(f: File, kind: String, t: String, secs: Int, ext: String, long: String = "") {
         File(dir, f.name + ".json").writeText(
-            JSONObject().put("kind", kind).put("t", t).put("secs", secs).put("ext", ext).toString())
+            JSONObject().put("kind", kind).put("t", t).put("secs", secs).put("ext", ext).put("long", long).toString())
         changed()
         kick()
     }
@@ -1029,6 +1146,8 @@ class Uploader(ctx: Context, private val cfg: Prefs, private val changed: () -> 
                 if (q.optString("kind") == "clip") {
                     url.addQueryParameter("secs", q.optInt("secs").toString())
                     url.addQueryParameter("ext", q.optString("ext"))
+                    // A long-record block: the router keeps the blocks together as one recording.
+                    q.optString("long").takeIf { it.isNotEmpty() }?.let { url.addQueryParameter("long", it) }
                 }
                 val req = Request.Builder().url(url.build())
                     .header("Authorization", "Bearer ${cfg.token}")
