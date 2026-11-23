@@ -1116,6 +1116,10 @@ class Uploader(ctx: Context, private val cfg: Prefs, private val changed: () -> 
     private var busy = false
     private var retry = 5_000L
     private val again = Runnable { flush() }
+    // Big uploads (a 10-minute block can be hundreds of MB): the router saves the whole file
+    // before it answers, so wait longer than for other requests.
+    private val client = Net.http.newBuilder().writeTimeout(2, java.util.concurrent.TimeUnit.MINUTES)
+        .readTimeout(5, java.util.concurrent.TimeUnit.MINUTES).build()
     /** Why the last upload failed ("" once one gets through): shown on the camera page. */
     @Volatile var lastError = ""
 
@@ -1164,7 +1168,7 @@ class Uploader(ctx: Context, private val cfg: Prefs, private val changed: () -> 
                     .post(data.asRequestBody("application/octet-stream".toMediaType()))
                     .build()
                 try {
-                    Net.http.newCall(req).execute().use { r ->
+                    client.newCall(req).execute().use { r ->
                         if (!r.isSuccessful) {
                             // The router says why in its answer: {"ok":false,"error":"..."}
                             val why = try { JSONObject(r.body?.string() ?: "").optString("error") } catch (_: Exception) { "" }
