@@ -86,7 +86,7 @@ class Stamp {
         val side = rot % 180 != 0
         val dw = if (side) h else w
         val dh = if (side) w else h
-        val size = maxOf(12f, minOf(dw, dh) / 22f)
+        val size = maxOf(12f, minOf(dw, dh) / 27f)
         val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply { textSize = size; typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD) }
         val tw = paint.measureText(text)
         val pad = (size / 3).toInt()
