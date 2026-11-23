@@ -349,7 +349,9 @@ class CameraService : Service() {
             }) ?: throw IOException("could not open the camera")
             val helper = SurfaceTextureHelper.create("capture", egl.eglBaseContext)
             val src = factory.createVideoSource(false)
-            cap.initialize(helper, applicationContext, TurnObserver(src.capturerObserver) { settings.optInt("rotate", 0) })
+            // Recordings take the camera's frames here, at the full size asked for. (After the video
+            // source, WebRTC may shrink them when the live stream struggles.)
+            cap.initialize(helper, applicationContext, TurnObserver(src.capturerObserver, { settings.optInt("rotate", 0) }) { f -> rec?.addFrame(f) })
             val r = res()
             cap.startCapture(r * 16 / 9 / 2 * 2, r, fps())
             val track = factory.createVideoTrack("video", src)
@@ -397,7 +399,6 @@ class CameraService : Service() {
 
     // Every camera frame passes through here (camera thread).
     private val sink = VideoSink { frame ->
-        rec?.addFrame(frame)
         val now = System.currentTimeMillis()
         lastRot = frame.rotation
         if (photoWanted && !photoBusy && now - camStartedAt > 1500 && wantFullPhoto() && !fullFailed) {
@@ -1085,6 +1086,7 @@ class CameraService : Service() {
             .put("app", true)
             .put("app_version", BuildConfig.VERSION_NAME)
             .put("waiting", uploader.waiting())
+            .put("upload_error", if (uploader.waiting() > 0) uploader.lastError else "")
             .put("fps", fps())
             .put("long", if (longActive()) JSONObject().put("id", longId).put("until", longUntil).put("fps", longRate())
                 .put("quality", longQuality).put("sound", longSound).put("block_started", if (recLong) recStarted else 0L) else JSONObject.NULL)
@@ -1114,6 +1116,8 @@ class Uploader(ctx: Context, private val cfg: Prefs, private val changed: () -> 
     private var busy = false
     private var retry = 5_000L
     private val again = Runnable { flush() }
+    /** Why the last upload failed ("" once one gets through): shown on the camera page. */
+    @Volatile var lastError = ""
 
     init {
         h.post { flush() }
@@ -1161,13 +1165,20 @@ class Uploader(ctx: Context, private val cfg: Prefs, private val changed: () -> 
                     .build()
                 try {
                     Net.http.newCall(req).execute().use { r ->
-                        if (!r.isSuccessful) throw IOException("HTTP ${r.code}")
+                        if (!r.isSuccessful) {
+                            // The router says why in its answer: {"ok":false,"error":"..."}
+                            val why = try { JSONObject(r.body?.string() ?: "").optString("error") } catch (_: Exception) { "" }
+                            throw IOException(if (why.isNotEmpty()) "the router said: $why" else "the router answered ${r.code}")
+                        }
                     }
                     data.delete()
                     meta.delete()
+                    lastError = ""
                     changed()
                 } catch (e: Exception) {
                     Log.w("Uploader", "upload ${data.name}: $e")
+                    lastError = e.message ?: e.toString()
+                    changed()
                     Net.http.connectionPool.evictAll()
                     // Try again soon, then less often: 5 s, 10 s, 20 s ... up to a minute.
                     h.removeCallbacks(again)
@@ -1184,12 +1195,14 @@ class Uploader(ctx: Context, private val cfg: Prefs, private val changed: () -> 
 }
 
 /** Adds the "Turn the picture" setting to every camera frame. */
-class TurnObserver(private val inner: CapturerObserver, private val extra: () -> Int) : CapturerObserver {
+class TurnObserver(private val inner: CapturerObserver, private val extra: () -> Int, private val raw: (VideoFrame) -> Unit) : CapturerObserver {
     override fun onCapturerStarted(ok: Boolean) = inner.onCapturerStarted(ok)
     override fun onCapturerStopped() = inner.onCapturerStopped()
     override fun onFrameCaptured(f: VideoFrame) {
         val e = extra()
-        if (e == 0) inner.onFrameCaptured(f)
-        else inner.onFrameCaptured(VideoFrame(f.buffer, (f.rotation + e) % 360, f.timestampNs))
+        val out = if (e == 0) f else VideoFrame(f.buffer, (f.rotation + e) % 360, f.timestampNs)
+        // The full-size frame for recordings, before anything shrinks it for live view.
+        try { raw(out) } catch (_: Exception) {}
+        inner.onFrameCaptured(out)
     }
 }
