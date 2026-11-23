@@ -141,6 +141,7 @@ class CameraService : Service() {
     private var longUntil = 0L
     private var longFps = 0
     private var longQuality = "normal"
+    private var longSound = false    // record sound too (needs the camera's microphone on)
     private var longError = ""
     private var recLong = false      // the recording running now is a long-record block
 
@@ -572,13 +573,14 @@ class CameraService : Service() {
         if (id.isNotEmpty() && until > System.currentTimeMillis()) {
             longId = id; longUntil = until
             longFps = p.getInt("fps", 0); longQuality = p.getString("quality", "normal") ?: "normal"
+            longSound = p.getBoolean("sound", false)
             Log.i(TAG, "long record carries on until $until")
         } else if (id.isNotEmpty()) {
             p.edit().clear().apply()
         }
     }
 
-    private fun startLong(hours: Double, fps: Int, quality: String) {
+    private fun startLong(hours: Double, fps: Int, quality: String, sound: Boolean) {
         if (longActive()) return
         if (rec != null) finishRecording()
         val now = System.currentTimeMillis()
@@ -586,9 +588,10 @@ class CameraService : Service() {
         longUntil = now + (hours.coerceIn(0.25, 48.0) * 3_600_000).toLong()
         longFps = fps.coerceIn(1, 30)
         longQuality = if (quality in listOf("low", "normal", "high")) quality else "normal"
+        longSound = sound
         longError = ""
         longPrefs().edit().putString("id", longId).putLong("until", longUntil)
-            .putInt("fps", longFps).putString("quality", longQuality).apply()
+            .putInt("fps", longFps).putString("quality", longQuality).putBoolean("sound", longSound).apply()
         update()
         tick()
     }
@@ -617,7 +620,7 @@ class CameraService : Service() {
 
     /** Room on the phone for another block (plus a margin), with the queue that's waiting. */
     private fun roomForBlock(): Boolean {
-        val block = longBitrate().toLong() / 8 * 600
+        val block = (longBitrate().toLong() + (if (longSound) 64_000 else 0)) / 8 * 600
         return uploader.dir.usableSpace > block + 200L * 1024 * 1024
     }
 
@@ -626,7 +629,9 @@ class CameraService : Service() {
         val now = System.currentTimeMillis()
         val f = File(uploader.dir, "long-$now.mp4")
         try {
-            rec = Recorder(f, longRate(), longBitrate(), 0, audioChannels)
+            // Sound when asked for and the microphone is sending it (the camera's Microphone setting).
+            val withAudio = longSound && mic() && audioRate > 0 && now - lastAudioAt < 3000
+            rec = Recorder(f, longRate(), longBitrate(), if (withAudio) audioRate else 0, audioChannels)
             recStarted = now
             recFile = f
             recStamp = stamp(now)
@@ -1030,7 +1035,7 @@ class CameraService : Service() {
                 "name" -> { name = m.optString("name"); cfg.name = name; changed() }
                 "stream" -> { wantStream = m.optBoolean("on"); update() }
                 "record" -> if (m.optBoolean("stop")) { if (!recLong) finishRecording() } else startRecording(m.optInt("seconds", 30).coerceIn(5, 3600), true)
-                "long" -> if (m.optBoolean("stop")) stopLong("") else startLong(m.optDouble("hours", 3.0), m.optInt("fps", 0), m.optString("quality", "normal"))
+                "long" -> if (m.optBoolean("stop")) stopLong("") else startLong(m.optDouble("hours", 3.0), m.optInt("fps", 0), m.optString("quality", "normal"), m.optBoolean("sound", false))
                 "photo" -> { photoWanted = true; update() }
                 "talk" -> setTalk(m.optBoolean("on"))
                 "torch" -> { torchCmd = m.optBoolean("on"); if (videoTrack != null) applyTorch() }
@@ -1082,7 +1087,8 @@ class CameraService : Service() {
             .put("waiting", uploader.waiting())
             .put("fps", fps())
             .put("long", if (longActive()) JSONObject().put("id", longId).put("until", longUntil).put("fps", longRate())
-                .put("quality", longQuality).put("block_started", if (recLong) recStarted else 0L) else JSONObject.NULL)
+                .put("quality", longQuality).put("sound", longSound).put("block_started", if (recLong) recStarted else 0L) else JSONObject.NULL)
+            .put("mic", mic())
             .put("long_error", longError))
         val parts = ArrayList<String>()
         parts.add(if (linked) "Connected to the router" else "Not connected")

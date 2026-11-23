@@ -213,6 +213,16 @@ class MainActivity : Activity() {
             }
             addView(go)
             addView(msg)
+            // With a camera page address known (from before, or the QR code), look for a newer app.
+            if (cfg.server.isNotEmpty()) {
+                val upMsg = text("", 14f, muted)
+                val up = button(if (updateTo > 0) "Install version 1.0.$updateTo" else "Check for updates") {}
+                up.setOnClickListener { updateTapped(up, upMsg) }
+                addView(up)
+                addView(upMsg)
+                autoCheck(up, upMsg)
+            }
+            addView(text("Phone Camera ${BuildConfig.VERSION_NAME}", 12f, muted))
         }
     }
 
@@ -324,6 +334,7 @@ class MainActivity : Activity() {
             addView(up)
             addView(upMsg)
             addView(text("Phone Camera ${BuildConfig.VERSION_NAME}", 12f, muted))
+            autoCheck(up, upMsg)
         }
         refresh()
     }
@@ -333,6 +344,22 @@ class MainActivity : Activity() {
     private val warn = Color.parseColor("#FFB4A8")
     private var updateTo = 0
     private var updateBusy = false
+
+    /** When a screen opens: ask the camera system quietly which app version it holds, and offer it if newer. */
+    private fun autoCheck(b: Button, msg: TextView) {
+        if (cfg.server.isEmpty() || updateBusy) return
+        Thread {
+            val v = try { Updater.latest(cfg) } catch (_: Exception) { 0 }
+            runOnUiThread {
+                if (v > BuildConfig.VERSION_CODE && !updateBusy) {
+                    updateTo = v
+                    b.text = "Install version 1.0.$v"
+                    msg.setTextColor(warn)
+                    msg.text = "A newer version (1.0.$v) is ready. Tap Install to update."
+                }
+            }
+        }.start()
+    }
 
     /** First tap asks the camera system which app version it holds; if newer, the next tap installs it. */
     private fun updateTapped(b: Button, msg: TextView) {
