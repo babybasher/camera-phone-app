@@ -352,7 +352,7 @@ class CameraService : Service() {
             val src = factory.createVideoSource(false)
             // Recordings take the camera's frames here, at the full size asked for. (After the video
             // source, WebRTC may shrink them when the live stream struggles.)
-            cap.initialize(helper, applicationContext, TurnObserver(src.capturerObserver, { settings.optInt("rotate", 0) }) { f -> rec?.addFrame(f) })
+            cap.initialize(helper, applicationContext, TurnObserver(src.capturerObserver, { settings.optInt("rotate", 0) }, { try { settings.optBoolean("stamp", false) } catch (_: Exception) { false } }) { f -> rec?.addFrame(f) })
             val r = res()
             cap.startCapture(r * 16 / 9 / 2 * 2, r, fps())
             val track = factory.createVideoTrack("video", src)
@@ -1104,6 +1104,7 @@ class CameraService : Service() {
                 .put("unlimited", longUntil == Long.MAX_VALUE).put("dropped", longDropped).put("size", longSide()).put("fps", longRate())
                 .put("quality", longQuality).put("sound", longSound).put("block_started", if (recLong) recStarted else 0L) else JSONObject.NULL)
             .put("mic", mic())
+            .put("stamp", settings.optBoolean("stamp", false))
             .put("long_error", longError))
         val parts = ArrayList<String>()
         parts.add(if (linked) "Connected to the router" else "Not connected")
@@ -1221,14 +1222,23 @@ class Uploader(ctx: Context, private val cfg: Prefs, private val changed: () -> 
 }
 
 /** Adds the "Turn the picture" setting to every camera frame. */
-class TurnObserver(private val inner: CapturerObserver, private val extra: () -> Int, private val raw: (VideoFrame) -> Unit) : CapturerObserver {
+class TurnObserver(private val inner: CapturerObserver, private val extra: () -> Int, private val stampOn: () -> Boolean, private val raw: (VideoFrame) -> Unit) : CapturerObserver {
+    private val stamp = Stamp()
     override fun onCapturerStarted(ok: Boolean) = inner.onCapturerStarted(ok)
     override fun onCapturerStopped() = inner.onCapturerStopped()
     override fun onFrameCaptured(f: VideoFrame) {
         val e = extra()
-        val out = if (e == 0) f else VideoFrame(f.buffer, (f.rotation + e) % 360, f.timestampNs)
-        // The full-size frame for recordings, before anything shrinks it for live view.
-        try { raw(out) } catch (_: Exception) {}
-        inner.onFrameCaptured(out)
+        var out = if (e == 0) f else VideoFrame(f.buffer, (f.rotation + e) % 360, f.timestampNs)
+        // The date and time in the corner (camera setting): written into the frame, so it's in
+        // live view and every recording.
+        val stamped = if (stampOn()) stamp.apply(out) else null
+        if (stamped != null) out = stamped
+        try {
+            // The full-size frame for recordings, before anything shrinks it for live view.
+            try { raw(out) } catch (_: Exception) {}
+            inner.onFrameCaptured(out)
+        } finally {
+            stamped?.release()
+        }
     }
 }
