@@ -352,13 +352,14 @@ class CameraService : Service() {
             val src = factory.createVideoSource(false)
             // Recordings take the camera's frames here, at the full size asked for. (After the video
             // source, WebRTC may shrink them when the live stream struggles.)
-            cap.initialize(helper, applicationContext, TurnObserver(src.capturerObserver, { settings.optInt("rotate", 0) }, { try { settings.optBoolean("stamp", false) } catch (_: Exception) { false } }) { f -> rec?.addFrame(f) })
+            cap.initialize(helper, applicationContext, TurnObserver(src.capturerObserver, { settings.optInt("rotate", 0) }, { try { settings.optBoolean("stamp", false) } catch (_: Exception) { false } }, { stampRot }) { f -> rec?.addFrame(f) })
             val r = res()
             cap.startCapture(r * 16 / 9 / 2 * 2, r, fps())
             val track = factory.createVideoTrack("video", src)
             track.addSink(sink)
             capturer = cap
             camDev = dev
+            watchOrientation(dev, front)
             torchOn = false
             texHelper = helper
             videoSource = src
@@ -379,7 +380,34 @@ class CameraService : Service() {
         }
     }
 
+    // Which way up the phone is actually held (tilt sensor), so the time stamp is drawn upright on
+    // the right-way-up picture and follows the phone when it's turned. -1 until the first reading
+    // (the stamp then goes by the frame's own rotation).
+    @Volatile private var stampRot = -1
+    private var orient: android.view.OrientationEventListener? = null
+    private var held = -1
+
+    private fun watchOrientation(dev: String, front: Boolean) {
+        orient?.disable(); orient = null; held = -1; stampRot = -1
+        val sensor = try {
+            (getSystemService(CAMERA_SERVICE) as android.hardware.camera2.CameraManager).getCameraCharacteristics(dev)
+                .get(android.hardware.camera2.CameraCharacteristics.SENSOR_ORIENTATION) ?: 90
+        } catch (_: Exception) { 90 }
+        val l = object : android.view.OrientationEventListener(this) {
+            override fun onOrientationChanged(o: Int) {
+                if (o == android.view.OrientationEventListener.ORIENTATION_UNKNOWN) return  // lying flat: keep what it was
+                val q = ((o + 45) / 90 * 90) % 360
+                // A little stickiness so it doesn't flicker when held near 45 degrees.
+                if (held >= 0 && q != held) { val d = Math.abs(((o - held + 540) % 360) - 180); if (d < 60) return }
+                held = q
+                stampRot = if (front) (sensor - q + 360) % 360 else (sensor + q) % 360
+            }
+        }
+        if (l.canDetectOrientation()) { l.enable(); orient = l }
+    }
+
     private fun stopCamera() {
+        orient?.disable(); orient = null
         closePublish()
         try { capturer?.stopCapture() } catch (_: Exception) {}
         capturer?.dispose(); capturer = null
@@ -1222,7 +1250,7 @@ class Uploader(ctx: Context, private val cfg: Prefs, private val changed: () -> 
 }
 
 /** Adds the "Turn the picture" setting to every camera frame. */
-class TurnObserver(private val inner: CapturerObserver, private val extra: () -> Int, private val stampOn: () -> Boolean, private val raw: (VideoFrame) -> Unit) : CapturerObserver {
+class TurnObserver(private val inner: CapturerObserver, private val extra: () -> Int, private val stampOn: () -> Boolean, private val stampRot: () -> Int, private val raw: (VideoFrame) -> Unit) : CapturerObserver {
     private val stamp = Stamp()
     override fun onCapturerStarted(ok: Boolean) = inner.onCapturerStarted(ok)
     override fun onCapturerStopped() = inner.onCapturerStopped()
@@ -1231,7 +1259,7 @@ class TurnObserver(private val inner: CapturerObserver, private val extra: () ->
         var out = if (e == 0) f else VideoFrame(f.buffer, (f.rotation + e) % 360, f.timestampNs)
         // The date and time in the corner (camera setting): written into the frame, so it's in
         // live view and every recording.
-        val stamped = if (stampOn()) stamp.apply(out) else null
+        val stamped = if (stampOn()) stamp.apply(out, stampRot().let { if (it < 0) out.rotation else it }) else null
         if (stamped != null) out = stamped
         try {
             // The full-size frame for recordings, before anything shrinks it for live view.

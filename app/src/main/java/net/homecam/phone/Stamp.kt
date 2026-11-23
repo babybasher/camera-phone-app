@@ -12,8 +12,8 @@ import java.util.Date
 import java.util.Locale
 
 /**
- * The date and time written into the picture's top left corner (as seen, whatever way the frame
- * is turned), like the Reolink cameras do. Goes into the frame itself, so live view, recordings,
+ * The date and time written into the top left corner of the right-way-up picture (by the phone's
+ * tilt sensor, so it follows the phone when it's turned), like the Reolink cameras do. Goes into the frame itself, so live view, recordings,
  * long records and photos all show it. White with a dark outline, readable on any background.
  */
 class Stamp {
@@ -26,16 +26,17 @@ class Stamp {
     private var alpha = IntArray(0)
     private var n = 0
 
-    /** Returns a new frame with the stamp (the caller releases it), or null if it couldn't. */
-    fun apply(f: VideoFrame): VideoFrame? {
+    /** Returns a new frame with the stamp (the caller releases it), or null if it couldn't.
+     *  [rot]: how far the camera's picture must turn (clockwise) to be the right way up. */
+    fun apply(f: VideoFrame, rot: Int): VideoFrame? {
         val src = f.buffer.toI420() ?: return null
         try {
             val w = src.width
             val h = src.height
             val buf = writable(src)
             val text = fmt.format(Date())
-            val k = "$text|$w|$h|${f.rotation}|${buf.strideY}|${buf.strideU}"
-            if (k != key) { build(text, w, h, f.rotation, buf.strideY, buf.strideU); key = k }
+            val k = "$text|$w|$h|$rot|${buf.strideY}|${buf.strideU}"
+            if (k != key) { build(text, w, h, rot, buf.strideY, buf.strideU); key = k }
             val sameUV = buf.strideU == buf.strideV
             val y = buf.dataY
             val u = buf.dataU
