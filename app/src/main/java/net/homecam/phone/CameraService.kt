@@ -547,6 +547,7 @@ class CameraService : Service() {
     private fun stamp(t: Long) = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(Date(t))
 
     private var recManual = false
+    private var recByMotion = false
 
     private fun startRecording(seconds: Int, manual: Boolean = false) {
         // A long record already records everything.
@@ -558,6 +559,7 @@ class CameraService : Service() {
             return
         }
         recManual = manual
+        recByMotion = !manual
         recUntil = now + seconds * 1000L
         update()
         if (videoTrack == null) return
@@ -583,9 +585,12 @@ class CameraService : Service() {
         val f = recFile
         val t = recStamp
         val long = if (recLong) longId else ""
+        // Started by the motion check (not Record): tagged "Motion" in Recordings.
+        val motion = recByMotion && long.isEmpty()
         recLong = false
+        recByMotion = false
         r.finish { secs ->
-            if (secs > 0 && f != null) uploader.add(f, "clip", t, secs, "mp4", long) else f?.delete()
+            if (secs > 0 && f != null) uploader.add(f, "clip", t, secs, "mp4", long, motion) else f?.delete()
             h.post { update() }
         }
         report()
@@ -1187,9 +1192,9 @@ class Uploader(ctx: Context, private val cfg: Prefs, private val changed: () -> 
         return true
     }
 
-    fun add(f: File, kind: String, t: String, secs: Int, ext: String, long: String = "") {
+    fun add(f: File, kind: String, t: String, secs: Int, ext: String, long: String = "", motion: Boolean = false) {
         File(dir, f.name + ".json").writeText(
-            JSONObject().put("kind", kind).put("t", t).put("secs", secs).put("ext", ext).put("long", long).toString())
+            JSONObject().put("kind", kind).put("t", t).put("secs", secs).put("ext", ext).put("long", long).put("motion", motion).toString())
         changed()
         kick()
     }
@@ -1213,6 +1218,7 @@ class Uploader(ctx: Context, private val cfg: Prefs, private val changed: () -> 
                     url.addQueryParameter("ext", q.optString("ext"))
                     // A long-record block: the router keeps the blocks together as one recording.
                     q.optString("long").takeIf { it.isNotEmpty() }?.let { url.addQueryParameter("long", it) }
+                    if (q.optBoolean("motion")) url.addQueryParameter("motion", "1")
                 }
                 val req = Request.Builder().url(url.build())
                     .header("Authorization", "Bearer ${cfg.token}")
