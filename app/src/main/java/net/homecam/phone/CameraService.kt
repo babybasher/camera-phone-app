@@ -100,6 +100,8 @@ class CameraService : Service() {
     @Volatile private var photoBusy = false
     @Volatile private var fullFailed = false
     @Volatile private var lastRot = 0
+    // The turn the camera's own picture needs (live view frames arrive already turned).
+    @Volatile private var rawRot = 0
     private var camDev = ""
     private var torchCmd = false
     private var torchOn = false
@@ -352,7 +354,7 @@ class CameraService : Service() {
             val src = factory.createVideoSource(false)
             // Recordings take the camera's frames here, at the full size asked for. (After the video
             // source, WebRTC may shrink them when the live stream struggles.)
-            cap.initialize(helper, applicationContext, TurnObserver(src.capturerObserver, { settings.optInt("rotate", 0) }, { try { settings.optBoolean("stamp", false) } catch (_: Exception) { false } }, { stampRot }) { f -> rec?.addFrame(f) })
+            cap.initialize(helper, applicationContext, TurnObserver(src.capturerObserver, { settings.optInt("rotate", 0) }, { try { settings.optBoolean("stamp", false) } catch (_: Exception) { false } }, { stampRot }, { r -> rawRot = r }) { f -> rec?.addFrame(f) })
             val r = res()
             cap.startCapture(r * 16 / 9 / 2 * 2, r, fps())
             val track = factory.createVideoTrack("video", src)
@@ -739,7 +741,7 @@ class CameraService : Service() {
         val cap = capturer
         if (cap == null || camDev.isEmpty()) { photoBusy = false; return }
         val dev = camDev
-        val rot = lastRot
+        val rot = rawRot
         val torch = wantTorch()
         val maxW = when (settings.optString("photo", "max")) { "1080" -> 1920; "720" -> 1280; else -> 0 }
         try { cap.stopCapture() } catch (e: Exception) { Log.w(TAG, "pause for photo: $e") }
@@ -1138,6 +1140,8 @@ class CameraService : Service() {
                 .put("quality", longQuality).put("sound", longSound).put("block_started", if (recLong) recStarted else 0L) else JSONObject.NULL)
             .put("mic", mic())
             .put("stamp", settings.optBoolean("stamp", false))
+            // Live view arrives the right way up (turned on the phone by its tilt sensor).
+            .put("upright", true)
             .put("long_error", longError))
         val parts = ArrayList<String>()
         parts.add(if (linked) "Connected to the router" else "Not connected")
@@ -1256,23 +1260,51 @@ class Uploader(ctx: Context, private val cfg: Prefs, private val changed: () -> 
 }
 
 /** Adds the "Turn the picture" setting to every camera frame. */
-class TurnObserver(private val inner: CapturerObserver, private val extra: () -> Int, private val stampOn: () -> Boolean, private val stampRot: () -> Int, private val raw: (VideoFrame) -> Unit) : CapturerObserver {
+class TurnObserver(private val inner: CapturerObserver, private val extra: () -> Int, private val stampOn: () -> Boolean, private val upright: () -> Int, private val seen: (Int) -> Unit, private val raw: (VideoFrame) -> Unit) : CapturerObserver {
     private val stamp = Stamp()
     override fun onCapturerStarted(ok: Boolean) = inner.onCapturerStarted(ok)
     override fun onCapturerStopped() = inner.onCapturerStopped()
     override fun onFrameCaptured(f: VideoFrame) {
-        val e = extra()
-        var out = if (e == 0) f else VideoFrame(f.buffer, (f.rotation + e) % 360, f.timestampNs)
+        // How far the camera's picture must turn to be the right way up: from the tilt sensor (how
+        // the phone is actually held), or the camera's own idea until the sensor has answered.
+        val t = upright()
+        val rot = (((if (t >= 0) t else f.rotation) + extra()) % 360 + 360) % 360
+        seen(rot)
+        val base = if (rot == f.rotation) f else VideoFrame(f.buffer, rot, f.timestampNs)
         // The date and time in the corner (camera setting): written into the frame, so it's in
         // live view and every recording.
-        val stamped = if (stampOn()) stamp.apply(out, stampRot().let { if (it < 0) out.rotation else it }) else null
-        if (stamped != null) out = stamped
+        val stamped = if (stampOn()) stamp.apply(base, rot) else null
+        val src = stamped ?: base
+        var live: VideoFrame? = null
         try {
-            // The full-size frame for recordings, before anything shrinks it for live view.
-            try { raw(out) } catch (_: Exception) {}
-            inner.onFrameCaptured(out)
+            // Recordings: the full-size frame (before anything shrinks it for live view), turned by
+            // the file's orientation note, which players follow.
+            try { raw(src) } catch (_: Exception) {}
+            // Live view: turned for real. The note doesn't survive the trip to the viewer's browser,
+            // so a sideways picture would arrive sideways.
+            live = if (rot == 0) null else Upright.turn(src, rot)
+            inner.onFrameCaptured(live ?: src)
         } finally {
+            live?.release()
             stamped?.release()
+        }
+    }
+}
+
+object Upright {
+    /** The frame's picture turned clockwise by [rot] (a new frame, the caller releases it), or null. */
+    fun turn(f: VideoFrame, rot: Int): VideoFrame? {
+        val i = f.buffer.toI420() ?: return null
+        return try {
+            val side = rot % 180 != 0
+            val out = org.webrtc.JavaI420Buffer.allocate(if (side) i.height else i.width, if (side) i.width else i.height)
+            org.webrtc.YuvHelper.I420Rotate(i.dataY, i.strideY, i.dataU, i.strideU, i.dataV, i.strideV,
+                out.dataY, out.strideY, out.dataU, out.strideU, out.dataV, out.strideV, i.width, i.height, rot)
+            VideoFrame(out, 0, f.timestampNs)
+        } catch (_: Throwable) {
+            null
+        } finally {
+            i.release()
         }
     }
 }
