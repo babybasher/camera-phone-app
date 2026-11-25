@@ -59,7 +59,7 @@ class GpuTurn {
             GLES20.glViewport(0, 0, w, h)
             GLES20.glClearColor(0f, 0f, 0f, 1f)
             GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
-            frameDrawer.drawFrame(VideoFrame(src.buffer, turn, src.timestampNs), drawer, null, 0, 0, w, h)
+            frameDrawer.drawFrame(VideoFrame(src.buffer, (turn + 180) % 360, src.timestampNs), drawer, null, 0, 0, w, h)
             if (stamp != null) drawStamp(stamp, w, h, seenTurn)
             GLES20.glFinish()
             val err = GLES20.glGetError()
@@ -177,7 +177,7 @@ object StampText {
         val H = outH.toFloat()
         // Seen point (top left origin) -> output point (top left origin).
         fun toOut(x: Float, y: Float): Pair<Float, Float> = when (r) {
-            90 -> Pair(y, H - x)
+            90 -> Pair(H - y, x)
             180 -> Pair(W - x, H - y)
             270 -> Pair(W - y, x)
             else -> Pair(x, y)
