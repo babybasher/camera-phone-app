@@ -14,8 +14,7 @@ android {
         targetSdk = 34
         versionCode = buildNumber
         versionName = "1.0.$buildNumber"
-        // Phones and tablets are ARM; leaving out emulator (x86) code halves the download.
-        ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a") }
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
     signingConfigs {
         create("release") {
@@ -27,6 +26,9 @@ android {
     }
     buildTypes {
         release {
+            // Phones and tablets are ARM; leaving out emulator (x86) code halves the download.
+            // (Test builds keep it, for the emulator.)
+            ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a") }
             isMinifyEnabled = false
             signingConfig = signingConfigs.getByName("release")
         }
@@ -46,4 +48,7 @@ android {
 dependencies {
     implementation("io.getstream:stream-webrtc-android:1.1.1")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
+    androidTestImplementation("androidx.test:runner:1.5.2")
+    androidTestImplementation("androidx.test.ext:junit:1.1.5")
+    androidTestImplementation("junit:junit:4.13.2")
 }
