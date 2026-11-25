@@ -357,8 +357,9 @@ class CameraService : Service() {
             val src = factory.createVideoSource(false)
             // Recordings take the camera's frames here, at the full size asked for. (After the video
             // source, WebRTC may shrink them when the live stream struggles.)
-            val obs = TurnObserver(src.capturerObserver, { settings.optInt("rotate", 0) }, { try { settings.optBoolean("stamp", false) } catch (_: Exception) { false } }, { stampRot }, { r -> rawRot = r }, { rec != null }) { f -> rec?.addFrame(f) }
+            val obs = TurnObserver(src.capturerObserver, { settings.optInt("rotate", 0) }, { try { settings.optBoolean("stamp", false) } catch (_: Exception) { false } }, { stampRot }, { r -> rawRot = r }, { rec != null }, { try { settings.optString("turn_with", "gpu") != "cpu" } catch (_: Exception) { true } }) { f -> rec?.addFrame(f) }
             obs.onGpuProblem = { why -> Log.w(TAG, "graphics chip turning failed, using the main processor: $why"); gpuProblem = why; h.post { changed() } }
+            gpuProblem = ""
             turnObs = obs
             cap.initialize(helper, applicationContext, obs)
             val r = res()
@@ -1113,6 +1114,8 @@ class CameraService : Service() {
     }
 
     private fun applySettings(s: JSONObject) {
+        // Graphics chip chosen again: forget why it failed before (it gets another go).
+        if (s.optString("turn_with", "") == "gpu" && settings.optString("turn_with", "gpu") == "cpu") gpuProblem = ""
         for (k in s.keys()) settings.put(k, s.get(k))
         motionOn = settings.optBoolean("motion", false)
         if (!motionOn) { prevSmall = null; hits = 0 }
@@ -1148,8 +1151,12 @@ class CameraService : Service() {
             .put("stamp", settings.optBoolean("stamp", false))
             // Live view arrives the right way up (turned on the phone by its tilt sensor).
             .put("upright", true)
-            .put("turning", when { gpuProblem.isNotEmpty() -> "processor"; turnObs?.usedGpu == true -> "graphics"; else -> "" })
-            .put("turning_error", gpuProblem)
+            .put("turning", when {
+                settings.optString("turn_with", "gpu") == "cpu" -> "processor"
+                gpuProblem.isNotEmpty() -> "processor"
+                turnObs?.usedGpu == true -> "graphics"
+                else -> "" })
+            .put("turning_error", if (settings.optString("turn_with", "gpu") == "cpu") "" else gpuProblem)
             .put("long_error", longError))
         val parts = ArrayList<String>()
         parts.add(if (linked) "Connected to the router" else "Not connected")
@@ -1268,7 +1275,7 @@ class Uploader(ctx: Context, private val cfg: Prefs, private val changed: () -> 
 }
 
 /** Adds the "Turn the picture" setting to every camera frame. */
-class TurnObserver(private val inner: CapturerObserver, private val extra: () -> Int, private val stampOn: () -> Boolean, private val upright: () -> Int, private val seen: (Int) -> Unit, private val recording: () -> Boolean, private val raw: (VideoFrame) -> Unit) : CapturerObserver {
+class TurnObserver(private val inner: CapturerObserver, private val extra: () -> Int, private val stampOn: () -> Boolean, private val upright: () -> Int, private val seen: (Int) -> Unit, private val recording: () -> Boolean, private val useGpu: () -> Boolean, private val raw: (VideoFrame) -> Unit) : CapturerObserver {
     private val stamp = Stamp()
     // The graphics chip does the turning and the stamp; the main processor version below is the
     // fallback if this phone's graphics driver won't (then it's used from then on).
@@ -1276,6 +1283,7 @@ class TurnObserver(private val inner: CapturerObserver, private val extra: () ->
     private var gpuFailed = false
     var onGpuProblem: ((String) -> Unit)? = null
     @Volatile var usedGpu = false
+    private var wantedGpu = true
     override fun onCapturerStarted(ok: Boolean) = inner.onCapturerStarted(ok)
     override fun onCapturerStopped() {
         try { gpu?.release() } catch (_: Exception) {}
@@ -1288,7 +1296,13 @@ class TurnObserver(private val inner: CapturerObserver, private val extra: () ->
         val t = upright()
         val rot = (((if (t >= 0) t else f.rotation) + extra()) % 360 + 360) % 360
         seen(rot)
-        if (!gpuFailed && f.buffer is VideoFrame.TextureBuffer && onGpu(f, rot)) return
+        // The owner's choice (camera settings): graphics chip, or the main processor for a phone whose
+        // graphics driver garbles it. Choosing the graphics chip again gives it another go.
+        val wantGpu = useGpu()
+        if (wantGpu && !wantedGpu) gpuFailed = false
+        wantedGpu = wantGpu
+        if (!wantGpu && gpu != null) { try { gpu?.release() } catch (_: Throwable) {}; gpu = null; usedGpu = false }
+        if (wantGpu && !gpuFailed && f.buffer is VideoFrame.TextureBuffer && onGpu(f, rot)) return
         val base = if (rot == f.rotation) f else VideoFrame(f.buffer, rot, f.timestampNs)
         // The date and time in the corner (camera setting): written into the frame, so it's in
         // live view and every recording.
