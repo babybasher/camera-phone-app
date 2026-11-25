@@ -883,8 +883,12 @@ class CameraService : Service() {
             .header("Authorization", "Bearer ${cfg.token}")
             .post(bytes.toRequestBody("image/jpeg".toMediaType()))
             .build()
-        try { Net.http.newCall(req).execute().close() } catch (e: Exception) { Log.w(TAG, "thumbnail: $e") }
+        // The last failure (or "" once one gets through), shown on the camera list.
+        thumbError = try {
+            Net.http.newCall(req).execute().use { r -> if (r.isSuccessful) "" else "the router answered ${r.code}" }
+        } catch (e: Exception) { Log.w(TAG, "thumbnail: $e"); e.message ?: e.javaClass.simpleName }
     }
+    @Volatile private var thumbError = ""
 
     // ---------------------------------------------------------------- live view and talk
 
@@ -1157,6 +1161,7 @@ class CameraService : Service() {
                 turnObs?.usedGpu == true -> "graphics"
                 else -> "" })
             .put("turning_error", if (settings.optString("turn_with", "gpu") == "cpu") "" else gpuProblem)
+            .put("thumb_error", thumbError)
             .put("long_error", longError))
         val parts = ArrayList<String>()
         parts.add(if (linked) "Connected to the router" else "Not connected")
