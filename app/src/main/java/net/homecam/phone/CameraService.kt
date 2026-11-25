@@ -345,7 +345,8 @@ class CameraService : Service() {
             val front = facing() == "user"
             val dev = en.deviceNames.firstOrNull { en.isFrontFacing(it) == front } ?: en.deviceNames.firstOrNull()
                 ?: throw IOException("no camera found")
-            val cap = en.createCapturer(dev, object : CameraVideoCapturer.CameraEventsHandler {
+            // Our copy of WebRTC's camera, without digital stabilization (it crops and softens).
+            val cap = org.webrtc.StillCamera2Capturer(this, dev, object : CameraVideoCapturer.CameraEventsHandler {
                 override fun onCameraError(e: String?) { problem = "Camera error: $e"; changed() }
                 override fun onCameraDisconnected() { problem = "The camera was taken by another app."; changed() }
                 override fun onCameraFreezed(e: String?) { Log.w(TAG, "camera frozen: $e") }
@@ -459,7 +460,8 @@ class CameraService : Service() {
             thumbWanted = false
             lastThumb = now
             val b = frame.buffer
-            val tw = 480
+            // Big enough to stay sharp on the camera list (shown up to about 800 wide).
+            val tw = minOf(960, b.width) / 2 * 2
             val th = (b.height * tw / maxOf(1, b.width)) / 2 * 2
             val small = b.cropAndScale(0, 0, b.width, b.height, tw, th)
             val i = small.toI420()
@@ -878,7 +880,7 @@ class CameraService : Service() {
 
     /** A small picture for the camera list: when the camera starts, every minute while on, and every 10 minutes otherwise. */
     private fun sendThumb(b: VideoFrame.I420Buffer, rotation: Int) {
-        val bytes = jpeg(b, rotation, 80)
+        val bytes = jpeg(b, rotation, 85)
         val req = Request.Builder().url(cfg.api + "/api/phone/" + cfg.id + "/thumb")
             .header("Authorization", "Bearer ${cfg.token}")
             .post(bytes.toRequestBody("image/jpeg".toMediaType()))
