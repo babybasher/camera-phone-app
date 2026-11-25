@@ -17,7 +17,6 @@ import org.junit.runner.RunWith
 import org.webrtc.EglBase
 import org.webrtc.JavaI420Buffer
 import org.webrtc.PeerConnectionFactory
-import org.webrtc.RendererCommon
 import org.webrtc.TextureBufferImpl
 import org.webrtc.ThreadUtils
 import org.webrtc.VideoFrame
@@ -84,7 +83,7 @@ class GpuTurnTest {
         GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0)
         bmp.recycle()
         // A bitmap's first row goes in at the texture's bottom: the matrix flips it the right way up.
-        val m = RendererCommon.convertMatrixToAndroidGraphicsMatrix(RendererCommon.verticalFlipMatrix())
+        val m = android.graphics.Matrix().apply { setScale(1f, -1f); postTranslate(0f, 1f) }
         val conv = YuvConverter()
         VideoFrame(TextureBufferImpl(tw, th, VideoFrame.TextureBuffer.Type.RGB, t[0], m, h, conv) {
             onGl { GLES20.glDeleteTextures(1, t, 0); conv.release() }
