@@ -11,6 +11,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.webrtc.JavaI420Buffer
+import java.nio.ByteBuffer
 
 /** "What moved": the model loads and runs on Android, and the rules for what counts. */
 @RunWith(AndroidJUnit4::class)
@@ -87,11 +88,12 @@ class DetectorTest {
 
     @Test fun picturesAreUpright() {
         // A sideways frame, top-left corner bright: turned 90 degrees it's at the top right.
-        val b = JavaI420Buffer.allocate(64, 48)
-        val y = b.dataY
-        for (r in 0 until 48) for (c in 0 until 64) y.put(r * b.strideY + c, (if (r < 8 && c < 8) 235 else 16).toByte())
-        for (i in 0 until b.dataU.capacity()) b.dataU.put(i, 128.toByte())
-        for (i in 0 until b.dataV.capacity()) b.dataV.put(i, 128.toByte())
+        val y = ByteBuffer.allocateDirect(64 * 48)
+        val u = ByteBuffer.allocateDirect(32 * 24)
+        val v0 = ByteBuffer.allocateDirect(32 * 24)
+        for (r in 0 until 48) for (c in 0 until 64) y.put(r * 64 + c, (if (r < 8 && c < 8) 235 else 16).toByte())
+        for (i in 0 until 32 * 24) { u.put(i, 128.toByte()); v0.put(i, 128.toByte()) }
+        val b = JavaI420Buffer.wrap(64, 48, y, 64, u, 32, v0, 32, null)
         val p = Detector.picture(b, 90)
         b.release()
         assertEquals(48, p.width); assertEquals(64, p.height)

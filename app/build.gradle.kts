@@ -28,6 +28,11 @@ android {
         }
     }
     buildTypes {
+        debug {
+            // Emulator tests: the detection library has no 64-bit emulator (x86_64) code, only 32-bit
+            // x86, so test builds leave x86_64 out and the emulator runs the app as 32-bit.
+            ndk { abiFilters += listOf("x86", "arm64-v8a", "armeabi-v7a") }
+        }
         release {
             // Phones and tablets are ARM; leaving out emulator (x86) code halves the download.
             // (Test builds keep it, for the emulator.)
