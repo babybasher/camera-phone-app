@@ -42,6 +42,7 @@ import okhttp3.Response
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
 import okhttp3.HttpUrl.Companion.toHttpUrl
+import org.json.JSONArray
 import org.json.JSONObject
 import org.webrtc.*
 import org.webrtc.audio.JavaAudioDeviceModule
@@ -157,6 +158,22 @@ class CameraService : Service() {
     private var hits = 0
     private var lastMotionSent = 0L
 
+    // What moved (Detector): after motion the phone looks at a few pictures and names what it sees.
+    private val detector by lazy { Detector(this) }
+    private val detectThread = HandlerThread("detect").apply { start() }
+    private val dh = Handler(detectThread.looper)
+    @Volatile private var detectWanted = false
+    @Volatile private var detectBusy = false
+    private var lastDetect = 0L
+    private var episode = 0L            // when the motion being looked at started (0 = none)
+    private var episodeChecks = 0
+    private var episodeQuietUntil = 0L
+    private val moved = ArrayList<Float>()   // where the picture changed since the last look (upright, 0..1), camera thread
+    @Volatile private var movedReset = false
+    private val still = ArrayList<Detector.Still>()   // detect thread
+    private var seen: JSONObject? = null
+    private val lastSentWhat = HashMap<String, Long>()
+
     // Link to the control service
     private var ws: WebSocket? = null
     private var wsGen = 0
@@ -223,6 +240,8 @@ class CameraService : Service() {
         wake?.release()
         wifi?.release()
         h.postDelayed({ worker.quitSafely() }, 3000)
+        dh.post { detector.close() }
+        detectThread.quitSafely()
         changed()
         super.onDestroy()
     }
@@ -492,6 +511,37 @@ class CameraService : Service() {
             val rot = frame.rotation
             if (i != null) Thread { try { sendThumb(i, rot) } finally { i.release() }; h.post { update() } }.start()
         }
+        if (detectWanted && !detectBusy && now - lastDetect >= 400 && now - camStartedAt > 1500) {
+            detectWanted = false
+            detectBusy = true
+            lastDetect = now
+            val b = frame.buffer
+            val tw = minOf(640, b.width) / 2 * 2
+            val th = (b.height * tw / maxOf(1, b.width)) / 2 * 2
+            val small = b.cropAndScale(0, 0, b.width, b.height, tw, th)
+            val i = small.toI420()
+            small.release()
+            val rot = frame.rotation
+            val pts = moved.toFloatArray()
+            val want = settings.optString("detect_what", "person,vehicle,animal").split(',').toSet()
+            if (i == null) detectBusy = false
+            else dh.post {
+                var v: Detector.Verdict? = null
+                try {
+                    val bmp = Detector.picture(i, rot)
+                    val found = detector.look(bmp)
+                    bmp.recycle()
+                    v = Detector.decide(found, pts, want, still, System.currentTimeMillis())
+                } catch (e: Throwable) {
+                    detector.error = (e.message ?: e.toString()).take(200)
+                } finally {
+                    i.release()
+                    detectBusy = false
+                }
+                val verdict = v
+                h.post { onLooked(verdict) }
+            }
+        }
         val watching = motionOn || alertsOn()
         if (!watching && prevSmall != null) { prevSmall = null; hits = 0 }
         if (watching && now - lastMotionCheck >= 250) {
@@ -530,7 +580,16 @@ class CameraService : Service() {
         val ratio = n.toDouble() / (if (m == null) g.size else maxOf(1, zoneCount))
         val need = 0.002 + (100 - settings.optInt("sens", 50)) / 100.0 * 0.06
         // A big jump across the whole picture is the camera adjusting to light, not motion.
-        if (ratio > need && all.toDouble() / g.size < 0.6) hits++ else hits = 0
+        val counts = ratio > need && all.toDouble() / g.size < 0.6
+        if (counts) hits++ else hits = 0
+        if (movedReset) { moved.clear(); movedReset = false }
+        if (counts && detectOn() && moved.size < 8000) {
+            // Where it changed, for the detector: only things where the picture moved count.
+            for (k in g.indices) if ((m == null || m[k]) && abs((g[k].toInt() and 255) - (prev[k].toInt() and 255)) > 22) {
+                val p = Detector.upright((k % 64 + 0.5f) / 64, (k / 64 + 0.5f) / 48, rot)
+                moved.add(p.first); moved.add(p.second)
+            }
+        }
         if (hits >= 2) h.post { onMotion() }
     }
 
@@ -574,10 +633,65 @@ class CameraService : Service() {
         if (!motionOn && !alertsOn()) return
         if (motionOn) startRecording(settings.optInt("after", 20))
         val now = System.currentTimeMillis()
-        if (now - lastMotionSent > 30_000) {
-            lastMotionSent = now
-            send(JSONObject().put("type", "motion"))
+        // Not naming what moved, or the detector can't run: plain "Motion detected" straight away.
+        if (!detectOn() || detector.error.isNotEmpty()) { alert(null); return }
+        if (episode != 0L && now - episode > 10_000) episode = 0L   // the camera stopped mid-look
+        if (episode == 0L && now >= episodeQuietUntil) {
+            episode = now
+            episodeChecks = 0
+            detectWanted = true
         }
+    }
+
+    private fun detectOn() = settings.optBoolean("detect", false)
+
+    /** One look after motion: alert about what it found, or after 3 looks with nothing, a plain alert (if wanted). */
+    private fun onLooked(v: Detector.Verdict?) {
+        val now = System.currentTimeMillis()
+        if (v == null) {
+            // The detector failed: don't lose the alert.
+            if (episode != 0L) { alert(null); endEpisode(now) }
+            report()
+            return
+        }
+        if (episode == 0L) return
+        episodeChecks++
+        val f = v.alert
+        val text = when {
+            f != null -> Detector.NAMES[f.label] ?: f.label
+            episodeChecks >= 3 -> "Nothing recognised"
+            else -> null
+        }
+        if (text != null) {
+            seen = JSONObject().put("at", now).put("text", text).put("notes", JSONArray(v.notes.take(6)))
+            report()
+        }
+        when {
+            f != null -> { alert(f.label); endEpisode(now) }
+            episodeChecks >= 3 -> { if (settings.optBoolean("alert_other", true)) alert(null); endEpisode(now) }
+            else -> detectWanted = true
+        }
+    }
+
+    private fun endEpisode(now: Long) {
+        episode = 0L
+        movedReset = true
+        episodeQuietUntil = now + 2000
+    }
+
+    /** Tell the router (it sends the alerts). A recognised thing isn't held back by a plain alert just before it. */
+    private fun alert(what: String?) {
+        val now = System.currentTimeMillis()
+        if (what == null) {
+            if (now - lastMotionSent <= 30_000) return
+        } else {
+            if (now - (lastSentWhat[what] ?: 0L) <= 30_000) return
+            lastSentWhat[what] = now
+        }
+        lastMotionSent = now
+        val m = JSONObject().put("type", "motion")
+        if (what != null) m.put("what", what)
+        send(m)
     }
 
     // ---------------------------------------------------------------- recording and photos
@@ -1184,6 +1298,10 @@ class CameraService : Service() {
             .put("stamp", settings.optBoolean("stamp", false))
             // This app can send motion alerts during a recording ("rec_alerts").
             .put("rec_alerts_ok", true)
+            // Can name what moved; the last look (what it saw and why things didn't count).
+            .put("detect_ok", true)
+            .put("detect_error", if (detectOn()) detector.error else "")
+            .put("seen", seen ?: JSONObject.NULL)
             // Live view arrives the right way up (turned on the phone by its tilt sensor).
             .put("upright", true)
             // The back lenses this phone offers, for "Which camera" in its settings.

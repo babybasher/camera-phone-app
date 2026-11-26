@@ -4,3 +4,5 @@ local.properties
 
 *.apk
 .idea/
+app/src/main/assets/detect.tflite
+app/src/main/assets/*.part
