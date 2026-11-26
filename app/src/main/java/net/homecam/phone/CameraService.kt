@@ -489,7 +489,9 @@ class CameraService : Service() {
             val rot = frame.rotation
             if (i != null) Thread { try { sendThumb(i, rot) } finally { i.release() }; h.post { update() } }.start()
         }
-        if (motionOn && now - lastMotionCheck >= 250) {
+        val watching = motionOn || alertsOn()
+        if (!watching && prevSmall != null) { prevSmall = null; hits = 0 }
+        if (watching && now - lastMotionCheck >= 250) {
             lastMotionCheck = now
             val b = frame.buffer
             val small = b.cropAndScale(0, 0, b.width, b.height, 64, 48)
@@ -562,10 +564,12 @@ class CameraService : Service() {
         return m
     }
 
+    /** "Motion alerts while recording": during Record or Long record, motion sends an alert but starts no clips of its own. */
+    private fun alertsOn() = settings.optBoolean("rec_alerts", false) && (rec != null || longActive())
+
     private fun onMotion() {
-        if (!motionOn) return
-        val after = settings.optInt("after", 20)
-        startRecording(after)
+        if (!motionOn && !alertsOn()) return
+        if (motionOn) startRecording(settings.optInt("after", 20))
         val now = System.currentTimeMillis()
         if (now - lastMotionSent > 30_000) {
             lastMotionSent = now
@@ -1175,6 +1179,8 @@ class CameraService : Service() {
                 .put("quality", longQuality).put("sound", longSound).put("block_started", if (recLong) recStarted else 0L) else JSONObject.NULL)
             .put("mic", mic())
             .put("stamp", settings.optBoolean("stamp", false))
+            // This app can send motion alerts during a recording ("rec_alerts").
+            .put("rec_alerts_ok", true)
             // Live view arrives the right way up (turned on the phone by its tilt sensor).
             .put("upright", true)
             // The back lenses this phone offers, for "Which camera" in its settings.
@@ -1195,6 +1201,7 @@ class CameraService : Service() {
         if (longActive()) parts.add(if (longUntil == Long.MAX_VALUE) "long record (until stopped)" else "long record until " + SimpleDateFormat("h:mm a", Locale.US).format(Date(longUntil)))
         else if (rec != null) parts.add("recording")
         if (motionOn) parts.add("motion detection on")
+        else if (alertsOn()) parts.add("motion alerts on")
         if (talkPc != null) parts.add("talk")
         if (torchOn) parts.add("torch on")
         if (videoTrack != null) parts.add("camera on")
