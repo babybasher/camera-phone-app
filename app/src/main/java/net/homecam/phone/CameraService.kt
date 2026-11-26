@@ -1164,6 +1164,7 @@ class CameraService : Service() {
             // Live view arrives the right way up (turned on the phone by its tilt sensor).
             .put("upright", true)
             // The back lenses this phone offers, for "Which camera" in its settings.
+            .put("camera_info", try { Lenses.describe(this@CameraService) } catch (_: Exception) { "" })
             .put("lenses", org.json.JSONArray().apply { Lenses.back(this@CameraService).forEach { put(JSONObject().put("key", it.key).put("label", it.label)) } })
             .put("turning", when {
                 settings.optString("turn_with", "gpu") == "cpu" -> "processor"

@@ -80,6 +80,36 @@ object Lenses {
         return out.sortedBy { it.times }
     }
 
+    private var info: String? = null
+
+    /**
+     * What the phone says about its cameras, for working out how to reach more lenses: each
+     * listed camera (facing, focal lengths, sensor size, zoom range, lenses inside it), and any
+     * unlisted camera numbers 0-9 that answer. Only asks about them; opens nothing.
+     */
+    @Synchronized
+    fun describe(ctx: Context): String {
+        info?.let { return it }
+        val cm = ctx.getSystemService(Context.CAMERA_SERVICE) as CameraManager
+        fun one(id: String): String? = try {
+            val c = cm.getCameraCharacteristics(id)
+            val facing = when (c.get(CameraCharacteristics.LENS_FACING)) { CameraCharacteristics.LENS_FACING_BACK -> "back"; CameraCharacteristics.LENS_FACING_FRONT -> "front"; else -> "other" }
+            val f = c.get(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)?.joinToString("/") { String.format(java.util.Locale.US, "%.2f", it) } ?: "?"
+            val sz = c.get(CameraCharacteristics.SENSOR_INFO_PHYSICAL_SIZE)?.let { String.format(java.util.Locale.US, "%.1fx%.1f", it.width, it.height) } ?: "?"
+            val z = if (Build.VERSION.SDK_INT >= 30) c.get(CameraCharacteristics.CONTROL_ZOOM_RATIO_RANGE)?.let { String.format(java.util.Locale.US, " zoom %.2f-%.1f", it.lower, it.upper) } ?: "" else ""
+            val phys = if (Build.VERSION.SDK_INT >= 28) c.physicalCameraIds.takeIf { it.isNotEmpty() }?.joinToString(",", " inside[", "]") { p ->
+                p + (try { cm.getCameraCharacteristics(p).get(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)?.firstOrNull()?.let { String.format(java.util.Locale.US, " f%.2f", it) } ?: "" } catch (_: Exception) { "" })
+            } ?: "" else ""
+            "$id $facing f$f $sz$z$phys"
+        } catch (_: Exception) { null }
+        val listed = cm.cameraIdList.toList()
+        val parts = listed.mapNotNull { one(it) }
+        val hidden = (0..9).map { it.toString() }.filter { it !in listed }.mapNotNull { one(it) }
+        val out = "Android ${Build.VERSION.RELEASE}; " + parts.joinToString("; ") + (if (hidden.isNotEmpty()) "; unlisted: " + hidden.joinToString("; ") else "; no unlisted ones")
+        info = out
+        return out
+    }
+
     /** The lens for a stored key; the main one if the phone doesn't have it (any more). */
     fun pick(ctx: Context, key: String): Lens? {
         val l = back(ctx)
