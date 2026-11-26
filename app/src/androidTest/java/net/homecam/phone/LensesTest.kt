@@ -38,6 +38,8 @@ class LensesTest {
         assertTrue("labels say which lens: $l", l.all { it.label.startsWith("Back: ") && !it.label.contains(',') })
         assertTrue("sorted widest first: $l", l.zipWithNext().all { (a, b) -> a.times <= b.times })
         assertEquals("an unknown key falls back to the main lens", "main", Lenses.pick(ctx, "cam:nope")?.key)
+        val d = Lenses.describe(ctx)
+        assertTrue("camera details: $d", d.startsWith("Android ") && d.contains(" back f") && (d.contains("unlisted: ") || d.endsWith("no unlisted ones")))
     }
 
     @Test fun opensWithAZoom() {
