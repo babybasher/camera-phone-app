@@ -320,8 +320,10 @@ class CameraService : Service() {
     private fun fps() = settings.optInt("fps", 15)
     private fun mic() = settings.optBoolean("mic", true)
     private fun facing() = settings.optString("facing", "environment")
+    /** Which back lens (Lenses keys): "main" unless chosen in the camera settings. */
+    private fun lens() = settings.optString("lens", "main")
 
-    private fun key() = "${res()}/${fps()}/${mic()}/${facing()}"
+    private fun key() = "${res()}/${fps()}/${mic()}/${facing()}/${lens()}"
 
     /** Turn the camera on or off (and the stream to the video service) to match what is needed. */
     private fun update() {
@@ -343,8 +345,12 @@ class CameraService : Service() {
         try {
             val en = Camera2Enumerator(this)
             val front = facing() == "user"
-            val dev = en.deviceNames.firstOrNull { en.isFrontFacing(it) == front } ?: en.deviceNames.firstOrNull()
+            // The back camera: the chosen lens (its own camera, or the main one's zoom).
+            val lens = if (front) null else Lenses.pick(this, lens())
+            val dev = lens?.camera?.takeIf { it in en.deviceNames }
+                ?: en.deviceNames.firstOrNull { en.isFrontFacing(it) == front } ?: en.deviceNames.firstOrNull()
                 ?: throw IOException("no camera found")
+            org.webrtc.StillCamera2Session.zoomRatio = lens?.zoom ?: 1f
             // Our copy of WebRTC's camera, without digital stabilization (it crops and softens).
             val cap = org.webrtc.StillCamera2Capturer(this, dev, object : CameraVideoCapturer.CameraEventsHandler {
                 override fun onCameraError(e: String?) { problem = "Camera error: $e"; changed() }
@@ -1157,6 +1163,8 @@ class CameraService : Service() {
             .put("stamp", settings.optBoolean("stamp", false))
             // Live view arrives the right way up (turned on the phone by its tilt sensor).
             .put("upright", true)
+            // The back lenses this phone offers, for "Which camera" in its settings.
+            .put("lenses", org.json.JSONArray().apply { Lenses.back(this@CameraService).forEach { put(JSONObject().put("key", it.key).put("label", it.label)) } })
             .put("turning", when {
                 settings.optString("turn_with", "gpu") == "cpu" -> "processor"
                 gpuProblem.isNotEmpty() -> "processor"
