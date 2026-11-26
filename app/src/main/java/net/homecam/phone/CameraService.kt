@@ -260,9 +260,12 @@ class CameraService : Service() {
 
     private fun startInForeground() {
         val nm = getSystemService(NotificationManager::class.java)
-        nm.createNotificationChannel(NotificationChannel("camera", "Camera running", NotificationManager.IMPORTANCE_LOW))
+        // The "camera is on" notice must stay while the camera runs, so it shouldn't put a "1" badge on the
+        // app icon. Android keeps a channel's badge setting once made, so this is a new channel replacing "camera".
+        nm.deleteNotificationChannel("camera")
+        nm.createNotificationChannel(NotificationChannel("camera_on", "Camera running", NotificationManager.IMPORTANCE_LOW).apply { setShowBadge(false) })
         val open = PendingIntent.getActivity(this, 0, Intent(this, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE)
-        val n = Notification.Builder(this, "camera")
+        val n = Notification.Builder(this, "camera_on")
             .setSmallIcon(R.drawable.ic_cam)
             .setContentTitle("${cfg.name.ifEmpty { "Phone" }} camera is on")
             .setContentText("Tap to see it or turn it off")
