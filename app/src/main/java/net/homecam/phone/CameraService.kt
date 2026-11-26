@@ -1275,10 +1275,17 @@ class CameraService : Service() {
         val bat = registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
         val level = bat?.let { 100 * it.getIntExtra(BatteryManager.EXTRA_LEVEL, 0) / maxOf(1, it.getIntExtra(BatteryManager.EXTRA_SCALE, 100)) }
         val charging = (bat?.getIntExtra(BatteryManager.EXTRA_PLUGGED, 0) ?: 0) != 0
+        // Health alerts on the router: heat (battery temperature, Android's own heat level) and storage.
+        val tempC = bat?.getIntExtra(BatteryManager.EXTRA_TEMPERATURE, Int.MIN_VALUE)?.takeIf { it != Int.MIN_VALUE }?.let { it / 10.0 }
+        val thermal = if (Build.VERSION.SDK_INT >= 29) try { getSystemService(PowerManager::class.java).currentThermalStatus } catch (_: Exception) { -1 } else -1
+        val freeMb = try { uploader.dir.usableSpace / (1024 * 1024) } catch (_: Exception) { -1L }
         send(JSONObject()
             .put("type", "status")
             .put("battery", level ?: JSONObject.NULL)
             .put("charging", charging)
+            .put("temp_c", tempC ?: JSONObject.NULL)
+            .put("thermal", if (thermal >= 0) thermal else JSONObject.NULL)
+            .put("free_mb", if (freeMb >= 0) freeMb else JSONObject.NULL)
             .put("streaming", wantStream && pubState == "CONNECTED")
             .put("recording", rec != null)
             .put("motion_on", motionOn)
