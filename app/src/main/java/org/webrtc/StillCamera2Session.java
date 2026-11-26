@@ -33,8 +33,6 @@ import org.webrtc.CameraEnumerationAndroid.CaptureFormat;
  * only zooms in and softens it. Optical stabilization (no crop) is still used where the lens has it.
  */
 class StillCamera2Session implements CameraSession {
-  /** homecam: the zoom to ask for (below 1 is the wide angle lens on phones that offer it that way). */
-  public static volatile float zoomRatio = 1f;
   private static final String TAG = "StillCamera2Session";
 
   private static final Histogram camera2StartTimeMsHistogram =
@@ -176,8 +174,8 @@ class StillCamera2Session implements CameraSession {
         chooseStabilizationMode(captureRequestBuilder);
         chooseFocusMode(captureRequestBuilder);
         // homecam: the chosen lens, when it's reached through the camera's zoom (Android 11+).
-        if (android.os.Build.VERSION.SDK_INT >= 30 && Math.abs(zoomRatio - 1f) > 0.01f) {
-          captureRequestBuilder.set(CaptureRequest.CONTROL_ZOOM_RATIO, zoomRatio);
+        if (android.os.Build.VERSION.SDK_INT >= 30 && Math.abs(StillCamera2Capturer.zoomRatio - 1f) > 0.01f) {
+          captureRequestBuilder.set(CaptureRequest.CONTROL_ZOOM_RATIO, StillCamera2Capturer.zoomRatio);
         }
 
         captureRequestBuilder.addTarget(surface);

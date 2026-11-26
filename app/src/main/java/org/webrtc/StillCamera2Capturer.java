@@ -15,6 +15,9 @@ import android.hardware.camera2.CameraManager;
 
 /** homecam: WebRTC's Camera2Capturer, using StillCamera2Session (no digital stabilization). */
 public class StillCamera2Capturer extends CameraCapturer {
+  /** homecam: the zoom to ask for (below 1 is the wide angle lens on phones that offer it that way). */
+  public static volatile float zoomRatio = 1f;
+
   private final CameraManager cameraManager;
 
   public StillCamera2Capturer(Context context, String cameraName, CameraEventsHandler eventsHandler) {

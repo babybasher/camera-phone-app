@@ -16,7 +16,6 @@ import org.webrtc.CapturerObserver
 import org.webrtc.EglBase
 import org.webrtc.PeerConnectionFactory
 import org.webrtc.StillCamera2Capturer
-import org.webrtc.StillCamera2Session
 import org.webrtc.SurfaceTextureHelper
 import org.webrtc.VideoFrame
 import java.util.concurrent.CountDownLatch
@@ -48,7 +47,7 @@ class LensesTest {
         // The widest zoom this camera allows (1 where it has no wide angle that way).
         val cm = ctx.getSystemService(android.content.Context.CAMERA_SERVICE) as CameraManager
         val z = if (Build.VERSION.SDK_INT >= 30) cm.getCameraCharacteristics(main.camera).get(CameraCharacteristics.CONTROL_ZOOM_RATIO_RANGE)?.lower ?: 1f else 1f
-        StillCamera2Session.zoomRatio = z
+        StillCamera2Capturer.zoomRatio = z
         val egl = EglBase.create()
         val helper = SurfaceTextureHelper.create("lens-test", egl.eglBaseContext)
         val frames = CountDownLatch(10)
@@ -69,7 +68,7 @@ class LensesTest {
         cap.startCapture(640, 480, 15)
         val got = frames.await(20, TimeUnit.SECONDS)
         cap.stopCapture(); cap.dispose(); helper.dispose(); egl.release()
-        StillCamera2Session.zoomRatio = 1f
+        StillCamera2Capturer.zoomRatio = 1f
         assertTrue("frames with zoom $z (error '$error')", got && error.isEmpty())
     }
 }

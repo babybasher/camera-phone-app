@@ -350,7 +350,7 @@ class CameraService : Service() {
             val dev = lens?.camera?.takeIf { it in en.deviceNames }
                 ?: en.deviceNames.firstOrNull { en.isFrontFacing(it) == front } ?: en.deviceNames.firstOrNull()
                 ?: throw IOException("no camera found")
-            org.webrtc.StillCamera2Session.zoomRatio = lens?.zoom ?: 1f
+            org.webrtc.StillCamera2Capturer.zoomRatio = lens?.zoom ?: 1f
             // Our copy of WebRTC's camera, without digital stabilization (it crops and softens).
             val cap = org.webrtc.StillCamera2Capturer(this, dev, object : CameraVideoCapturer.CameraEventsHandler {
                 override fun onCameraError(e: String?) { problem = "Camera error: $e"; changed() }
