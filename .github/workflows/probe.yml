@@ -1,0 +1,12 @@
+name: Probe
+on: push
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          set +e
+          for v in 0.10.14 0.10.20 0.10.21 0.10.26; do
+            curl -sSLf -o a.aar https://dl.google.com/dl/android/maven2/com/google/mediapipe/tasks-vision/$v/tasks-vision-$v.aar && echo "$v: $(unzip -l a.aar | grep -o 'jni/[^ ]*\.so' | tr '\n' ' ')" || echo "$v missing"
+          done
+          curl -s https://dl.google.com/dl/android/maven2/com/google/mediapipe/tasks-vision/maven-metadata.xml | grep -o "<version>[^<]*" | tr '\n' ' '
