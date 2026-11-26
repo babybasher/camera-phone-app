@@ -1,3 +1,6 @@
+import java.net.URI
+import java.security.MessageDigest
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
@@ -65,11 +68,11 @@ val fetchModel = tasks.register("fetchModel") {
         val url = "https://storage.googleapis.com/mediapipe-models/object_detector/efficientdet_lite2/int8/1/efficientdet_lite2.tflite"
         val want = "b3f50554cb0ea559e90328845f7d9ba4d13c8bff372914d24e06bc8bb72fa896"
         val f = file("src/main/assets/detect.tflite")
-        fun sha(x: File) = java.security.MessageDigest.getInstance("SHA-256").digest(x.readBytes()).joinToString("") { "%02x".format(it) }
+        fun sha(x: File) = MessageDigest.getInstance("SHA-256").digest(x.readBytes()).joinToString("") { "%02x".format(it) }
         if (f.exists() && sha(f) == want) return@doLast
         f.parentFile.mkdirs()
         val tmp = File(f.path + ".part")
-        java.net.URI(url).toURL().openStream().use { i -> tmp.outputStream().use { i.copyTo(it) } }
+        URI(url).toURL().openStream().use { i -> tmp.outputStream().use { i.copyTo(it) } }
         check(sha(tmp) == want) { "detection model: checksum doesn't match" }
         tmp.renameTo(f)
     }
