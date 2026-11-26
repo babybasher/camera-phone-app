@@ -40,6 +40,9 @@ class LensesTest {
         assertEquals("an unknown key falls back to the main lens", "main", Lenses.pick(ctx, "cam:nope")?.key)
         val d = Lenses.describe(ctx)
         assertTrue("camera details: $d", d.startsWith("Android ") && d.contains(" back f") && (d.contains("unlisted: ") || d.endsWith("no unlisted ones")))
+        // A lens the phone refused isn't offered again, and its key then means the main lens.
+        Lenses.refuse("cam:nope")
+        assertEquals("main", Lenses.pick(ctx, "cam:nope")?.key)
     }
 
     @Test fun opensWithAZoom() {
@@ -50,6 +53,7 @@ class LensesTest {
         val cm = ctx.getSystemService(android.content.Context.CAMERA_SERVICE) as CameraManager
         val z = if (Build.VERSION.SDK_INT >= 30) cm.getCameraCharacteristics(main.camera).get(CameraCharacteristics.CONTROL_ZOOM_RATIO_RANGE)?.lower ?: 1f else 1f
         StillCamera2Capturer.zoomRatio = z
+        StillCamera2Capturer.extraNames = arrayOf("98")  // a name the phone doesn't have: the list grows, nothing breaks
         val egl = EglBase.create()
         val helper = SurfaceTextureHelper.create("lens-test", egl.eglBaseContext)
         val frames = CountDownLatch(10)
@@ -71,6 +75,7 @@ class LensesTest {
         val got = frames.await(20, TimeUnit.SECONDS)
         cap.stopCapture(); cap.dispose(); helper.dispose(); egl.release()
         StillCamera2Capturer.zoomRatio = 1f
+        StillCamera2Capturer.extraNames = arrayOf()
         assertTrue("frames with zoom $z (error '$error')", got && error.isEmpty())
     }
 }

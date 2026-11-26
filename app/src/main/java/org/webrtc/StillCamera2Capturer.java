@@ -17,11 +17,20 @@ import android.hardware.camera2.CameraManager;
 public class StillCamera2Capturer extends CameraCapturer {
   /** homecam: the zoom to ask for (below 1 is the wide angle lens on phones that offer it that way). */
   public static volatile float zoomRatio = 1f;
+  /** homecam: cameras the phone doesn't list but will open (e.g. a wide angle lens), found by the app. */
+  public static volatile String[] extraNames = new String[0];
 
   private final CameraManager cameraManager;
 
   public StillCamera2Capturer(Context context, String cameraName, CameraEventsHandler eventsHandler) {
-    super(cameraName, eventsHandler, new Camera2Enumerator(context));
+    super(cameraName, eventsHandler, new Camera2Enumerator(context) {
+      @Override
+      public String[] getDeviceNames() {
+        java.util.List<String> l = new java.util.ArrayList<>(java.util.Arrays.asList(super.getDeviceNames()));
+        for (String n : extraNames) if (!l.contains(n)) l.add(n);
+        return l.toArray(new String[0]);
+      }
+    });
 
     cameraManager = (CameraManager) context.getSystemService(Context.CAMERA_SERVICE);
   }

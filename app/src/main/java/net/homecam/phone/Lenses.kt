@@ -15,14 +15,28 @@ import kotlin.math.roundToInt
  */
 object Lenses {
     /** [key] is what the settings store; [camera] the camera id to open; [zoom] the zoom to ask for. */
-    data class Lens(val key: String, val label: String, val camera: String, val zoom: Float, val times: Float)
+    data class Lens(val key: String, val label: String, val camera: String, val zoom: Float, val times: Float, val unlisted: Boolean = false)
+
+    /** Lenses this phone refused to open (this run of the app): not offered again. */
+    private val refused = HashSet<String>()
+
+    @Synchronized
+    fun refuse(key: String) { refused.add(key); cached = cached?.filter { it.key != key } }
+
+    /** Back cameras the phone doesn't list but answers for (some phones keep the wide angle there). */
+    fun unlistedBacks(cm: CameraManager): List<String> {
+        val listed = cm.cameraIdList.toSet()
+        return (0..99).map { it.toString() }.filter { it !in listed }.filter {
+            try { cm.getCameraCharacteristics(it).get(CameraCharacteristics.LENS_FACING) == CameraCharacteristics.LENS_FACING_BACK } catch (_: Exception) { false }
+        }
+    }
 
     private var cached: List<Lens>? = null
 
     @Synchronized
     fun back(ctx: Context): List<Lens> {
         cached?.let { return it }
-        val found = try { find(ctx.getSystemService(Context.CAMERA_SERVICE) as CameraManager) } catch (_: Exception) { emptyList() }
+        val found = try { find(ctx.getSystemService(Context.CAMERA_SERVICE) as CameraManager) } catch (_: Exception) { emptyList() }.filter { it.key !in refused }
         cached = found
         return found
     }
@@ -61,6 +75,13 @@ object Lenses {
             val times = mainView / v
             if (abs(times - 1f) < 0.15f || have(times)) continue
             out.add(Lens("cam:$id", label(times), id, 1f, times))
+        }
+        // Back cameras the phone doesn't list (it may still open them).
+        if (mainView != null) for (id in try { unlistedBacks(cm) } catch (_: Exception) { emptyList() }) {
+            val v = try { view(cm.getCameraCharacteristics(id)) } catch (_: Exception) { null } ?: continue
+            val times = mainView / v
+            if (abs(times - 1f) < 0.15f || have(times)) continue
+            out.add(Lens("cam:$id", label(times), id, 1f, times, unlisted = true))
         }
         // The main camera's own zoom: below 1x switches to its wide angle lens.
         if (Build.VERSION.SDK_INT >= 30) {
@@ -104,7 +125,7 @@ object Lenses {
         } catch (_: Exception) { null }
         val listed = cm.cameraIdList.toList()
         val parts = listed.mapNotNull { one(it) }
-        val hidden = (0..9).map { it.toString() }.filter { it !in listed }.mapNotNull { one(it) }
+        val hidden = (0..99).map { it.toString() }.filter { it !in listed }.mapNotNull { one(it) }
         val out = "Android ${Build.VERSION.RELEASE}; " + parts.joinToString("; ") + (if (hidden.isNotEmpty()) "; unlisted: " + hidden.joinToString("; ") else "; no unlisted ones")
         info = out
         return out
@@ -113,6 +134,6 @@ object Lenses {
     /** The lens for a stored key; the main one if the phone doesn't have it (any more). */
     fun pick(ctx: Context, key: String): Lens? {
         val l = back(ctx)
-        return l.firstOrNull { it.key == key } ?: l.firstOrNull()
+        return l.firstOrNull { it.key == key } ?: l.firstOrNull { it.key == "main" } ?: l.firstOrNull()
     }
 }

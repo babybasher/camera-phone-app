@@ -322,6 +322,7 @@ class CameraService : Service() {
     private fun facing() = settings.optString("facing", "environment")
     /** Which back lens (Lenses keys): "main" unless chosen in the camera settings. */
     private fun lens() = settings.optString("lens", "main")
+    @Volatile private var lensError = ""
 
     private fun key() = "${res()}/${fps()}/${mic()}/${facing()}/${lens()}"
 
@@ -347,17 +348,30 @@ class CameraService : Service() {
             val front = facing() == "user"
             // The back camera: the chosen lens (its own camera, or the main one's zoom).
             val lens = if (front) null else Lenses.pick(this, lens())
-            val dev = lens?.camera?.takeIf { it in en.deviceNames }
+            // Unlisted cameras (a wide angle lens some phones keep unlisted) may be opened too.
+            org.webrtc.StillCamera2Capturer.extraNames = Lenses.back(this).filter { it.unlisted }.map { it.camera }.toTypedArray()
+            val dev = lens?.camera?.takeIf { it in en.deviceNames || lens.unlisted }
                 ?: en.deviceNames.firstOrNull { en.isFrontFacing(it) == front } ?: en.deviceNames.firstOrNull()
                 ?: throw IOException("no camera found")
             org.webrtc.StillCamera2Capturer.zoomRatio = lens?.zoom ?: 1f
+            val lensKey = lens?.key ?: ""
+            var gotFrame = false
             // Our copy of WebRTC's camera, without digital stabilization (it crops and softens).
             val cap = org.webrtc.StillCamera2Capturer(this, dev, object : CameraVideoCapturer.CameraEventsHandler {
-                override fun onCameraError(e: String?) { problem = "Camera error: $e"; changed() }
+                override fun onCameraError(e: String?) {
+                    // A lens the phone won't open: back to the main one, and say so in its settings.
+                    if (!gotFrame && lensKey.isNotEmpty() && lensKey != "main") {
+                        Lenses.refuse(lensKey)
+                        lensError = "This phone wouldn't open that lens, so the camera is on its main lens."
+                        h.post { stopCamera(); update() }
+                        return
+                    }
+                    problem = "Camera error: $e"; changed()
+                }
                 override fun onCameraDisconnected() { problem = "The camera was taken by another app."; changed() }
                 override fun onCameraFreezed(e: String?) { Log.w(TAG, "camera frozen: $e") }
                 override fun onCameraOpening(n: String?) {}
-                override fun onFirstFrameAvailable() { problem = ""; changed(); h.postDelayed({ if (wantTorch()) applyTorch() }, 300) }
+                override fun onFirstFrameAvailable() { gotFrame = true; if (lensKey == lens()) lensError = ""; problem = ""; changed(); h.postDelayed({ if (wantTorch()) applyTorch() }, 300) }
                 override fun onCameraClosed() {}
             }) ?: throw IOException("could not open the camera")
             val helper = SurfaceTextureHelper.create("capture", egl.eglBaseContext)
@@ -1164,6 +1178,7 @@ class CameraService : Service() {
             // Live view arrives the right way up (turned on the phone by its tilt sensor).
             .put("upright", true)
             // The back lenses this phone offers, for "Which camera" in its settings.
+            .put("lens_error", lensError)
             .put("camera_info", try { Lenses.describe(this@CameraService) } catch (_: Exception) { "" })
             .put("lenses", org.json.JSONArray().apply { Lenses.back(this@CameraService).forEach { put(JSONObject().put("key", it.key).put("label", it.label)) } })
             .put("turning", when {
