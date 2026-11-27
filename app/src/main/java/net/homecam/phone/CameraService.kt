@@ -1284,6 +1284,7 @@ class CameraService : Service() {
                 "record" -> if (m.optBoolean("stop")) { if (!recLong) finishRecording() } else startRecording(m.optInt("seconds", 30).coerceIn(5, 3600), true)
                 "long" -> if (m.optBoolean("stop")) stopLong("") else startLong(m.optDouble("hours", 3.0), m.optInt("fps", 0), m.optString("quality", "normal"), m.optBoolean("sound", false))
                 "photo" -> { photoWanted = true; update() }
+                "identify" -> identify(m)
                 "talk" -> setTalk(m.optBoolean("on"))
                 "torch" -> { torchCmd = m.optBoolean("on"); if (videoTrack != null) applyTorch() }
                 "removed" -> {
@@ -1304,6 +1305,50 @@ class CameraService : Service() {
             changed()
         }
     }
+
+    /** Looks done for the Reolinks (the settings page shows it). */
+    @Volatile private var helped = 0
+
+    /**
+     * Help a Reolink camera name what moved: the router sends its pictures (JPEG, base64) and
+     * waits a few seconds for what this phone sees in them. Done on the detector's own thread, so
+     * it takes turns with this camera's own looks.
+     */
+    private fun identify(m: JSONObject) {
+        val job = m.optString("job")
+        val pics = m.optJSONArray("pics") ?: JSONArray()
+        val want = m.optString("want", "person,vehicle,bike,animal").split(',').toSet()
+        dh.post {
+            val t0 = System.currentTimeMillis()
+            val out = JSONObject().put("type", "identified").put("job", job)
+            try {
+                val jpegs = (0 until pics.length()).map { android.util.Base64.decode(pics.getString(it), android.util.Base64.DEFAULT) }
+                val r = detector.help(jpegs, want)
+                when {
+                    r.pics == 0 -> out.put("error", "couldn't read the pictures")
+                    detector.error.isNotEmpty() -> out.put("error", "the detector can't run: " + detector.error)
+                    else -> {
+                        val found = JSONArray()
+                        for ((k, f) in r.found) found.put(JSONObject().put("pic", k).put("label", f.label).put("score", (f.score * 1000).toInt() / 1000.0)
+                            .put("box", JSONArray().put(r3(f.box.left)).put(r3(f.box.top)).put(r3(f.box.right)).put(r3(f.box.bottom)))
+                            .apply { if (f.label in Detector.WILD.values) put("wild", true) })
+                        val moved = JSONArray()
+                        for (x in r.moved) moved.put(r3(x))
+                        out.put("found", found).put("moved", moved)
+                            .put("dev", (Build.MANUFACTURER.replaceFirstChar { it.uppercase() } + " " + Build.MODEL).take(60))
+                            .put("model", "EfficientDet-Lite2" + if ("animal" in want) " + wildlife check" else "")
+                        helped++
+                    }
+                }
+            } catch (e: Throwable) {
+                out.put("error", (e.message ?: e.toString()).take(120))
+            }
+            out.put("look_ms", System.currentTimeMillis() - t0)
+            send(out)
+        }
+    }
+
+    private fun r3(x: Float) = Math.round(x * 1000) / 1000.0
 
     private fun applySettings(s: JSONObject) {
         // Graphics chip chosen again: forget why it failed before (it gets another go).
@@ -1354,6 +1399,9 @@ class CameraService : Service() {
             .put("rec_alerts_ok", true)
             // Can name what moved; the last look (what it saw and why things didn't count).
             .put("detect_ok", true)
+            // Can look at a Reolink's pictures for the router, and how many times it has.
+            .put("helper_ok", true)
+            .put("helped", helped)
             .put("detect_error", if (detectOn()) detector.error else "")
             .put("seen", seen ?: JSONObject.NULL)
             // Live view arrives the right way up (turned on the phone by its tilt sensor).

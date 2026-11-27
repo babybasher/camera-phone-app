@@ -1,7 +1,9 @@
 package net.homecam.phone
 
 import android.graphics.Bitmap
+import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.Paint
 import android.graphics.RectF
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
@@ -11,6 +13,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.webrtc.JavaI420Buffer
+import java.io.ByteArrayOutputStream
 import java.nio.ByteBuffer
 
 /** "What moved": the model loads and runs on Android, and the rules for what counts. */
@@ -35,6 +38,35 @@ class DetectorTest {
         assertEquals("the model loads from the app: '${d.error}'", "", d.error)
         assertTrue("a plain grey picture has nothing in it: $found", found.none { it.score >= 0.5f })
         assertTrue("one look is quick enough (took $ms ms, model load included)", ms < 15_000)
+        d.close()
+    }
+
+    /** A Reolink's pictures (2 MP JPEGs), looked at for the router: decoded, compared, looked at. */
+    @Test fun helpsAReolink() {
+        fun pic(x: Float): ByteArray {
+            val b = Bitmap.createBitmap(1920, 1080, Bitmap.Config.ARGB_8888)
+            b.eraseColor(Color.rgb(120, 130, 110))
+            Canvas(b).drawRect(x, 400f, x + 200f, 800f, Paint().apply { color = Color.BLACK })
+            val o = ByteArrayOutputStream()
+            b.compress(Bitmap.CompressFormat.JPEG, 85, o)
+            b.recycle()
+            return o.toByteArray()
+        }
+        assertEquals("a 2 MP picture is looked at half size", 960, Detector.decode(pic(0f))!!.width)
+        val d = Detector(InstrumentationRegistry.getInstrumentation().targetContext)
+        val t0 = System.currentTimeMillis()
+        val r = d.help(listOf(pic(600f), pic(900f), pic(1200f)), setOf("person", "vehicle", "bike", "animal"))
+        val ms = System.currentTimeMillis() - t0
+        assertEquals("", d.error)
+        assertEquals(3, r.pics)
+        assertTrue("3 pictures looked at quickly enough (took $ms ms, models loaded too)", ms < 15_000)
+        // Where they changed: where the dark square was and where it went (0.31 to 0.73 across).
+        val box = Detector.movedBox(r.moved)
+        assertTrue("changed where the square moved: $box", box != null && box.left < 0.35f && box.right > 0.65f && box.top < 0.4f && box.bottom > 0.7f)
+        // A change nearly everywhere (night vision switching on) isn't where something moved.
+        assertEquals(0, Detector.changes(listOf(IntArray(64 * 48) { 100 }, IntArray(64 * 48) { 200 })).size)
+        assertEquals("one picture: nothing to compare", 0, Detector.changes(listOf(IntArray(64 * 48))).size)
+        assertNull("not a picture", Detector.decode(byteArrayOf(1, 2, 3)))
         d.close()
     }
 

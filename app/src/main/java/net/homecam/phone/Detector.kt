@@ -2,6 +2,7 @@ package net.homecam.phone
 
 import android.content.Context
 import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.graphics.Matrix
 import android.graphics.RectF
 import com.google.mediapipe.framework.image.BitmapImageBuilder
@@ -105,6 +106,29 @@ class Detector(private val ctx: Context) {
         return Found(key, score, RectF(x0.toFloat() / w, y0.toFloat() / h, (x0 + side) / w, (y0 + side) / h))
     }
 
+    /** A look at a Reolink's pictures for the router: what it saw in each (picture number, thing) and where they changed. */
+    class Help(val found: List<Pair<Int, Found>>, val moved: FloatArray, val pics: Int)
+
+    /**
+     * Helping a Reolink camera (it can't run a detector): the router sends a few of its pictures,
+     * about a second apart, as JPEGs. Everything it recognises in each, where they changed, and,
+     * when nothing it knows is where they changed, the wildlife check on that patch. The router
+     * decides what counts (ticked, sure enough, not parked there).
+     */
+    fun help(jpegs: List<ByteArray>, want: Set<String>): Help {
+        val bmps = jpegs.mapNotNull { decode(it) }
+        try {
+            val found = ArrayList<Pair<Int, Found>>()
+            bmps.forEachIndexed { k, b -> look(b).forEach { found.add(Pair(k, it)) } }
+            val moved = changes(bmps.map { grid(it) })
+            val known = found.any { (_, f) -> GROUPS.containsKey(f.label) && f.score >= needScore(f.label) && movedIn(f.box, moved) >= 2 }
+            if (!known && "animal" in want && bmps.isNotEmpty()) wildlife(bmps.last(), moved)?.let { found.add(Pair(bmps.size - 1, it)) }
+            return Help(found, moved, bmps.size)
+        } finally {
+            bmps.forEach { it.recycle() }
+        }
+    }
+
     fun close() {
         try { det?.close() } catch (_: Throwable) {}
         det = null
@@ -173,6 +197,43 @@ class Detector(private val ctx: Context) {
         // How sure it must be before an alert says so. People matter most and are what the
         // model knows best; others need a little more.
         fun needScore(label: String) = if (label == "person") 0.45f else 0.5f
+
+        /** A JPEG as a picture about 1,000 wide at most (plenty for the detector; a 2 MP one is halved). */
+        fun decode(jpeg: ByteArray): Bitmap? {
+            val o = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            BitmapFactory.decodeByteArray(jpeg, 0, jpeg.size, o)
+            if (o.outWidth <= 0 || o.outHeight <= 0) return null
+            var s = 1
+            while (o.outWidth / (s * 2) >= 900) s *= 2
+            return BitmapFactory.decodeByteArray(jpeg, 0, jpeg.size, BitmapFactory.Options().apply { inSampleSize = s })
+        }
+
+        /** A 64 x 48 grey copy of a picture (0..255), for comparing pictures. */
+        fun grid(bmp: Bitmap): IntArray {
+            val small = Bitmap.createScaledBitmap(bmp, 64, 48, true)
+            val px = IntArray(64 * 48)
+            small.getPixels(px, 0, 64, 0, 0, 64, 48)
+            if (small !== bmp) small.recycle()
+            return IntArray(px.size) { val c = px[it]; (((c shr 16) and 255) * 77 + ((c shr 8) and 255) * 150 + (c and 255) * 29) shr 8 }
+        }
+
+        /**
+         * Where pictures taken about a second apart changed (x, y pairs, 0..1): the spots of their
+         * grey copies that changed by more than 22, the same rule as the phone's own motion check.
+         * A pair that changed nearly everywhere (the light, or night vision switching) is left out.
+         */
+        fun changes(grids: List<IntArray>): FloatArray {
+            val out = ArrayList<Float>()
+            for (k in 1 until grids.size) {
+                val a = grids[k - 1]
+                val b = grids[k]
+                if (a.size != 64 * 48 || b.size != a.size) continue
+                val ch = a.indices.filter { kotlin.math.abs(a[it] - b[it]) > 22 }
+                if (ch.size > a.size * 0.6) continue
+                for (i in ch) { out.add((i % 64 + 0.5f) / 64); out.add((i / 64 + 0.5f) / 48) }
+            }
+            return out.toFloatArray()
+        }
 
         /** Where a point of the camera's (sideways) frame is in the upright picture. */
         fun upright(fx: Float, fy: Float, rot: Int): Pair<Float, Float> = when (((rot % 360) + 360) % 360) {
