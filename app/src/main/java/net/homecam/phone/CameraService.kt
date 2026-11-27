@@ -64,6 +64,14 @@ import kotlin.math.abs
  */
 class CameraService : Service() {
     companion object {
+        // What moved: looks after motion (half a second apart, so about 3 s: a door opening, then
+        // who comes through), and the pause before the next round (short after "nothing", so
+        // motion that carries on is looked at again almost straight away).
+        const val LOOKS = 6
+        const val LOOK_GAP = 500L
+        const val QUIET_AFTER_FOUND = 2000L
+        const val QUIET_AFTER_NOTHING = 500L
+
         const val TAG = "CameraService"
         @Volatile var instance: CameraService? = null
         /** The screen listens for changes here. */
@@ -511,7 +519,7 @@ class CameraService : Service() {
             val rot = frame.rotation
             if (i != null) Thread { try { sendThumb(i, rot) } finally { i.release() }; h.post { update() } }.start()
         }
-        if (detectWanted && !detectBusy && now - lastDetect >= 400 && now - camStartedAt > 1500) {
+        if (detectWanted && !detectBusy && now - lastDetect >= LOOK_GAP && now - camStartedAt > 1500) {
             detectWanted = false
             detectBusy = true
             lastDetect = now
@@ -670,7 +678,7 @@ class CameraService : Service() {
         val f = v.alert
         val text = when {
             f != null -> Detector.NAMES[f.label] ?: f.label
-            episodeChecks >= 3 -> "Nothing recognised"
+            episodeChecks >= LOOKS -> "Nothing recognised"
             else -> null
         }
         if (text != null) {
@@ -679,15 +687,15 @@ class CameraService : Service() {
         }
         when {
             f != null -> { if (Detector.worthLogging(lastEvents, f, v.at)) logEvent(v.at, f.label, f.score); alert(f.label); endEpisode(now) }
-            episodeChecks >= 3 -> { logEvent(episode, null, 0f); if (settings.optBoolean("alert_other", true)) alert(null); endEpisode(now) }
+            episodeChecks >= LOOKS -> { logEvent(episode, null, 0f); if (settings.optBoolean("alert_other", true)) alert(null); endEpisode(now, QUIET_AFTER_NOTHING) }
             else -> detectWanted = true
         }
     }
 
-    private fun endEpisode(now: Long) {
+    private fun endEpisode(now: Long, quiet: Long = QUIET_AFTER_FOUND) {
         episode = 0L
         movedReset = true
-        episodeQuietUntil = now + 2000
+        episodeQuietUntil = now + quiet
     }
 
     /** Tell the router (it sends the alerts). A recognised thing isn't held back by a plain alert just before it. */
