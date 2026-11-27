@@ -107,23 +107,58 @@ class Detector(private val ctx: Context) {
     }
 
     /** A look at a Reolink's pictures for the router: what it saw in each (picture number, thing) and where they changed. */
-    class Help(val found: List<Pair<Int, Found>>, val moved: FloatArray, val pics: Int)
+    class Help(val found: List<Pair<Int, Found>>, val moved: FloatArray, val pics: Int, val model: String = "EfficientDet-Lite2", val dark: Boolean = false)
+
+    /** The better detector (fetched from the camera page once); EfficientDet until it's here. */
+    val yolo = Yolo(ctx)
+
+    /**
+     * The better detector's look at one picture: the whole of it, then closer at where it
+     * changed (small or far-off things fill more of it); a dark one brightened first.
+     */
+    fun lookBetter(bmp: Bitmap, moved: FloatArray, tone: Yolo.Tone? = Yolo.darkTone(bmp)): List<Found> {
+        val t = tone ?: Yolo.Tone.PLAIN
+        val all = ArrayList(yolo.look(bmp, null, t))
+        Yolo.closeUp(movedBox(moved))?.let { all.addAll(yolo.look(bmp, it, t)) }
+        return Yolo.nms(all)
+    }
 
     /**
      * Helping a Reolink camera (it can't run a detector): the router sends a few of its pictures,
      * about a second apart, as JPEGs. Everything it recognises in each, where they changed, and,
      * when nothing it knows is where they changed, the wildlife check on that patch. The router
-     * decides what counts (ticked, sure enough, not parked there).
+     * decides what counts (ticked, sure enough, not parked there, seen in two pictures). With
+     * the better detector: the first and last pictures (where it was, where it went), each
+     * whole and close up, brightened at night.
      */
     fun help(jpegs: List<ByteArray>, want: Set<String>): Help {
         val bmps = jpegs.mapNotNull { decode(it) }
         try {
             val found = ArrayList<Pair<Int, Found>>()
-            bmps.forEachIndexed { k, b -> look(b).forEach { found.add(Pair(k, it)) } }
             val moved = changes(bmps.map { grid(it) })
+            val better = yolo.ready() && bmps.isNotEmpty()
+            var dark = false
+            if (better) {
+                val t0 = System.currentTimeMillis()
+                val picks = if (bmps.size <= 2) bmps.indices.toList() else listOf(0, bmps.size - 1)
+                for (k in picks) {
+                    val tone = Yolo.darkTone(bmps[k])
+                    if (tone != null) dark = true
+                    // Slow phone: no close-ups once half the router's wait is gone.
+                    val f = if (System.currentTimeMillis() - t0 > 1800) yolo.look(bmps[k], null, tone ?: Yolo.Tone.PLAIN) else lookBetter(bmps[k], moved, tone)
+                    f.forEach { found.add(Pair(k, it)) }
+                }
+            }
+            // It couldn't run after all: EfficientDet, as before.
+            val usedBetter = better && !yolo.failed()
+            if (!usedBetter) {
+                found.clear()
+                dark = false
+                bmps.forEachIndexed { k, b -> look(b).forEach { found.add(Pair(k, it)) } }
+            }
             val known = found.any { (_, f) -> GROUPS.containsKey(f.label) && f.score >= needScore(f.label) && movedIn(f.box, moved) >= 2 }
             if (!known && "animal" in want && bmps.isNotEmpty()) wildlife(bmps.last(), moved)?.let { found.add(Pair(bmps.size - 1, it)) }
-            return Help(found, moved, bmps.size)
+            return Help(found, moved, bmps.size, if (usedBetter) Yolo.NAME else "EfficientDet-Lite2", dark)
         } finally {
             bmps.forEach { it.recycle() }
         }
@@ -134,6 +169,7 @@ class Detector(private val ctx: Context) {
         det = null
         try { cls?.close() } catch (_: Throwable) {}
         cls = null
+        yolo.close()
     }
 
     companion object {

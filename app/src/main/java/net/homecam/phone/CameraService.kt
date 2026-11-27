@@ -537,7 +537,11 @@ class CameraService : Service() {
                 var v: Detector.Verdict? = null
                 try {
                     val bmp = Detector.picture(i, rot)
-                    val found = detector.look(bmp)
+                    // Plugged in: the better detector (close up where it moved, brightened at
+                    // night). On battery, or until it's fetched: EfficientDet (lighter).
+                    val better = plugged && detector.yolo.ready()
+                    var found = if (better) detector.lookBetter(bmp, pts) else emptyList()
+                    if (!better || detector.yolo.failed()) found = detector.look(bmp)
                     var d = Detector.decide(found, pts, want, still, System.currentTimeMillis()).copy(at = now)
                     // Nothing it knows where it moved: ask the wildlife check about that patch.
                     if (d.alert == null && "animal" in want) {
@@ -1308,6 +1312,8 @@ class CameraService : Service() {
 
     /** Looks done for the Reolinks (the settings page shows it). */
     @Volatile private var helped = 0
+    // On the charger (from the last status report): the phone's own looks use the better detector.
+    @Volatile private var plugged = false
 
     /**
      * Help a Reolink camera name what moved: the router sends its pictures (JPEG, base64) and
@@ -1331,12 +1337,13 @@ class CameraService : Service() {
                         val found = JSONArray()
                         for ((k, f) in r.found) found.put(JSONObject().put("pic", k).put("label", f.label).put("score", (f.score * 1000).toInt() / 1000.0)
                             .put("box", JSONArray().put(r3(f.box.left)).put(r3(f.box.top)).put(r3(f.box.right)).put(r3(f.box.bottom)))
-                            .apply { if (f.label in Detector.WILD.values) put("wild", true) })
+                            .apply { if (f.label in Detector.WILD.values) put("wild", true) else if (r.model == Yolo.NAME) put("src", "coco") })
                         val moved = JSONArray()
                         for (x in r.moved) moved.put(r3(x))
                         out.put("found", found).put("moved", moved)
                             .put("dev", (Build.MANUFACTURER.replaceFirstChar { it.uppercase() } + " " + Build.MODEL).take(60))
-                            .put("model", "EfficientDet-Lite2" + if ("animal" in want) " + wildlife check" else "")
+                            .put("model", r.model + if ("animal" in want) " + wildlife check" else "")
+                        if (r.dark) out.put("dark", true)
                         helped++
                     }
                 }
@@ -1365,6 +1372,8 @@ class CameraService : Service() {
         val bat = registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
         val level = bat?.let { 100 * it.getIntExtra(BatteryManager.EXTRA_LEVEL, 0) / maxOf(1, it.getIntExtra(BatteryManager.EXTRA_SCALE, 100)) }
         val charging = (bat?.getIntExtra(BatteryManager.EXTRA_PLUGGED, 0) ?: 0) != 0
+        plugged = charging
+        detector.yolo.fetchSoon(cfg)
         // Health alerts on the router: heat (battery temperature, Android's own heat level) and storage.
         val tempC = bat?.getIntExtra(BatteryManager.EXTRA_TEMPERATURE, Int.MIN_VALUE)?.takeIf { it != Int.MIN_VALUE }?.let { it / 10.0 }
         val thermal = if (Build.VERSION.SDK_INT >= 29) try { getSystemService(PowerManager::class.java).currentThermalStatus } catch (_: Exception) { -1 } else -1
@@ -1403,6 +1412,8 @@ class CameraService : Service() {
             .put("helper_ok", true)
             .put("helped", helped)
             .put("detect_error", if (detectOn()) detector.error else "")
+            // The better detector: "" when here or not fetched yet, else fetching or what went wrong.
+            .put("detector2", if (detector.yolo.ready()) "ready" else detector.yolo.state)
             .put("seen", seen ?: JSONObject.NULL)
             // Live view arrives the right way up (turned on the phone by its tilt sensor).
             .put("upright", true)

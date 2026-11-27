@@ -60,6 +60,8 @@ dependencies {
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     // "What moved": on-phone object detection (no internet; the model is in the app).
     implementation("com.google.mediapipe:tasks-vision:0.10.14")
+    // The better detector (YOLO11s, fetched from the camera page): plain TensorFlow Lite.
+    implementation("org.tensorflow:tensorflow-lite:2.16.1")
     androidTestImplementation("androidx.test:runner:1.5.2")
     androidTestImplementation("androidx.test:rules:1.5.0")
     androidTestImplementation("androidx.test.ext:junit:1.1.5")

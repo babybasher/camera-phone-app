@@ -10,6 +10,12 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
+      - name: Test files (the better detector and two photos, from the test-model branch)
+        run: |
+          git fetch -q --depth 1 origin +test-model:refs/remotes/origin/test-model
+          mkdir -p app/src/androidTest/assets
+          for f in phone-helper-yolo11s.tflite bus.jpg zidane.jpg; do git show origin/test-model:$f > app/src/androidTest/assets/$f; done
+          cd app/src/androidTest/assets && git show origin/test-model:SHA256SUMS | grep -E "tflite|jpg" | sha256sum -c
       - name: Allow the emulator to use KVM
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules

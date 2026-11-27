@@ -7,3 +7,4 @@ local.properties
 app/src/main/assets/detect.tflite
 app/src/main/assets/*.part
 app/src/main/assets/wildlife.tflite
+app/src/androidTest/assets/
