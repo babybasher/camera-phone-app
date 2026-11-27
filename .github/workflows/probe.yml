@@ -1,0 +1,17 @@
+name: Probe
+on: push
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          set +e
+          for m in efficientnet_lite0/int8/1/efficientnet_lite0.tflite efficientnet_lite0/float32/1/efficientnet_lite0.tflite efficientnet_lite2/int8/1/efficientnet_lite2.tflite efficientnet_lite2/float32/1/efficientnet_lite2.tflite; do
+            rm -rf x; mkdir x; cd x
+            if curl -sSLf -o m.tflite https://storage.googleapis.com/mediapipe-models/image_classifier/$m; then
+              echo "MODEL $m $(stat -c%s m.tflite) $(sha256sum m.tflite | cut -c1-64)"
+              unzip -o -q m.tflite 2>/dev/null; ls
+              for f in *.txt; do echo "LABELS $f $(wc -l < $f)"; grep -n -i -E "fox|wallaby|kangaroo|rabbit|hare$|hare,|snake|viper|python|cobra|mamba|boa|diamondback|sidewinder|possum|koala|wombat|echidna|platypus|adder" $f | tr '\n' ';'; echo; done
+            else echo "MISSING $m"; fi
+            cd ..
+          done
