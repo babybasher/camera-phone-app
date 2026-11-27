@@ -21,7 +21,7 @@ class Detector(private val ctx: Context) {
     /** Something seen before in the same place (a parked car): not what moved. */
     class Still(val label: String, val box: RectF, val first: Long, var last: Long, var times: Int)
     /** What to alert about (null: nothing that counts), and what it saw, for the settings page. */
-    data class Verdict(val alert: Found?, val notes: List<String>)
+    data class Verdict(val alert: Found?, val notes: List<String>, val at: Long = 0)
 
     private var det: ObjectDetector? = null
     @Volatile var error = ""
@@ -67,7 +67,9 @@ class Detector(private val ctx: Context) {
         /** The things that can alert, by group (the settings tick boxes). */
         val GROUPS = mapOf(
             "person" to "person",
-            "bicycle" to "vehicle", "car" to "vehicle", "motorcycle" to "vehicle", "bus" to "vehicle", "truck" to "vehicle",
+            "car" to "vehicle", "bus" to "vehicle", "truck" to "vehicle",
+            // Bicycles and motorbikes: their own tick box (easily mistaken for each other, not for cars).
+            "bicycle" to "bike", "motorcycle" to "bike",
             "bird" to "animal", "cat" to "animal", "dog" to "animal", "horse" to "animal", "sheep" to "animal", "cow" to "animal",
         )
         val NAMES = mapOf(

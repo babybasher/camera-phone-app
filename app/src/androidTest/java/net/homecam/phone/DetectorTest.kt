@@ -65,6 +65,12 @@ class DetectorTest {
         v = Detector.decide(listOf(f("bird", 0.7f, 0.45f, 0.5f, 0.55f, 0.6f)), moved, all, ArrayList(), 0)
         assertEquals("a chicken is a bird", "bird", v.alert?.label)
 
+        // Bicycles and motorbikes have their own tick, apart from cars.
+        val bike = f("motorcycle", 0.8f, 0.42f, 0.4f, 0.58f, 0.9f)
+        assertNull("bikes not ticked", Detector.decide(listOf(bike), moved, setOf("person", "vehicle", "animal"), ArrayList(), 0).alert)
+        assertEquals("motorcycle", Detector.decide(listOf(bike), moved, setOf("bike"), ArrayList(), 0).alert?.label)
+        assertEquals("bike", Detector.GROUPS["bicycle"])
+
         v = Detector.decide(listOf(f("car", 0.55f, 0.3f, 0.3f, 0.7f, 0.9f), person), moved, all, ArrayList(), 0)
         assertEquals("the surest counts first", "person", v.alert?.label)
     }

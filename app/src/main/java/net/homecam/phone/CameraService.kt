@@ -523,7 +523,7 @@ class CameraService : Service() {
             small.release()
             val rot = frame.rotation
             val pts = moved.toFloatArray()
-            val want = settings.optString("detect_what", "person,vehicle,animal").split(',').toSet()
+            val want = settings.optString("detect_what", "person,vehicle,bike,animal").split(',').toSet()
             if (i == null) detectBusy = false
             else dh.post {
                 var v: Detector.Verdict? = null
@@ -531,7 +531,7 @@ class CameraService : Service() {
                     val bmp = Detector.picture(i, rot)
                     val found = detector.look(bmp)
                     bmp.recycle()
-                    v = Detector.decide(found, pts, want, still, System.currentTimeMillis())
+                    v = Detector.decide(found, pts, want, still, System.currentTimeMillis()).copy(at = now)
                 } catch (e: Throwable) {
                     detector.error = (e.message ?: e.toString()).take(200)
                 } finally {
@@ -634,7 +634,12 @@ class CameraService : Service() {
         if (motionOn) startRecording(settings.optInt("after", 20))
         val now = System.currentTimeMillis()
         // Not naming what moved, or the detector can't run: plain "Motion detected" straight away.
-        if (!detectOn() || detector.error.isNotEmpty()) { alert(null); return }
+        if (!detectOn() || detector.error.isNotEmpty()) {
+            // One "unidentified" mark every 5 seconds of motion, for the recordings' timelines.
+            if (now - lastPlainEvent >= 5000) { lastPlainEvent = now; logEvent(now, null, 0f) }
+            alert(null)
+            return
+        }
         if (episode != 0L && now - episode > 10_000) episode = 0L   // the camera stopped mid-look
         if (episode == 0L && now >= episodeQuietUntil) {
             episode = now
@@ -667,8 +672,8 @@ class CameraService : Service() {
             report()
         }
         when {
-            f != null -> { alert(f.label); endEpisode(now) }
-            episodeChecks >= 3 -> { if (settings.optBoolean("alert_other", true)) alert(null); endEpisode(now) }
+            f != null -> { logEvent(v.at, f.label, f.score); alert(f.label); endEpisode(now) }
+            episodeChecks >= 3 -> { logEvent(episode, null, 0f); if (settings.optBoolean("alert_other", true)) alert(null); endEpisode(now) }
             else -> detectWanted = true
         }
     }
@@ -1225,6 +1230,30 @@ class CameraService : Service() {
         try { ws?.send(j.toString()) } catch (_: Exception) {}
     }
 
+    // Motion events for the recordings' timelines: what moved (or "" = unidentified) and when.
+    // Kept until the router has them (it may be out of reach for a while during a long record).
+    private val events = ArrayDeque<JSONObject>()
+    private var lastPlainEvent = 0L
+
+    private fun logEvent(at: Long, what: String?, score: Float) {
+        synchronized(events) {
+            events.addLast(JSONObject().put("type", "event").put("at", at).put("what", what ?: "").put("score", (score * 100).toInt()))
+            while (events.size > 3000) events.removeFirst()
+        }
+        h.post { flushEvents() }
+    }
+
+    private fun flushEvents() {
+        val w = ws ?: return
+        synchronized(events) {
+            while (events.isNotEmpty()) {
+                val ok = try { w.send(events.first().toString()) } catch (_: Exception) { false }
+                if (!ok) break
+                events.removeFirst()
+            }
+        }
+    }
+
     private fun handle(text: String) {
         val m = try { JSONObject(text) } catch (e: Exception) { return }
         try {
@@ -1232,6 +1261,7 @@ class CameraService : Service() {
                 "hello" -> {
                     m.optString("name").takeIf { it.isNotEmpty() }?.let { name = it; cfg.name = it }
                     applySettings(m.optJSONObject("settings") ?: JSONObject())
+                    h.post { flushEvents() }
                 }
                 "settings" -> applySettings(m.optJSONObject("settings") ?: JSONObject())
                 "name" -> { name = m.optString("name"); cfg.name = name; changed() }
@@ -1288,6 +1318,8 @@ class CameraService : Service() {
             .put("free_mb", if (freeMb >= 0) freeMb else JSONObject.NULL)
             .put("streaming", wantStream && pubState == "CONNECTED")
             .put("recording", rec != null)
+            // Started with Record (not by motion): the camera page shows Stop for it.
+            .put("rec_manual", rec != null && recManual)
             .put("motion_on", motionOn)
             .put("camera", if (videoTrack != null) "on" else "off")
             .put("res", res())
