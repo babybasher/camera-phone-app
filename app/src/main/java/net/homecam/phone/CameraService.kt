@@ -672,7 +672,7 @@ class CameraService : Service() {
             report()
         }
         when {
-            f != null -> { logEvent(v.at, f.label, f.score); alert(f.label); endEpisode(now) }
+            f != null -> { if (Detector.worthLogging(lastEvents, f, v.at)) logEvent(v.at, f.label, f.score); alert(f.label); endEpisode(now) }
             episodeChecks >= 3 -> { logEvent(episode, null, 0f); if (settings.optBoolean("alert_other", true)) alert(null); endEpisode(now) }
             else -> detectWanted = true
         }
@@ -1234,6 +1234,7 @@ class CameraService : Service() {
     // Kept until the router has them (it may be out of reach for a while during a long record).
     private val events = ArrayDeque<JSONObject>()
     private var lastPlainEvent = 0L
+    private val lastEvents = HashMap<String, Pair<android.graphics.RectF, Long>>()
 
     private fun logEvent(at: Long, what: String?, score: Float) {
         synchronized(events) {

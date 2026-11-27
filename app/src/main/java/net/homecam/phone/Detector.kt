@@ -142,6 +142,20 @@ class Detector(private val ctx: Context) {
             return Verdict(best, notes)
         }
 
+        /**
+         * Worth a new motion event? Not when the same kind of thing (person / vehicle / bike /
+         * animal: a grey cat taken for a dog one moment and a cat the next is one animal) is still
+         * in about the same place as the last one logged under a minute ago. `last` is updated.
+         */
+        fun worthLogging(last: MutableMap<String, Pair<RectF, Long>>, f: Found, t: Long): Boolean {
+            val key = GROUPS[f.label] ?: f.label
+            val prev = last[key]
+            val same = prev != null && t - prev.second < 60_000 && iou(prev.first, f.box) > 0.3f
+            // Still there: follow it as it shifts, but keep the time of the event that was logged.
+            last[key] = if (same) Pair(RectF(f.box), prev!!.second) else Pair(RectF(f.box), t)
+            return !same
+        }
+
         /** A camera frame (any size) as an upright picture about `width` wide, for the detector. */
         fun picture(frame: VideoFrame.I420Buffer, rotation: Int): Bitmap {
             val w = frame.width

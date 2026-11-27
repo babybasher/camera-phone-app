@@ -92,6 +92,17 @@ class DetectorTest {
         assertEquals("people never count as parked", "person", Detector.decide(listOf(person), moved, all, still, 10 * 60_000).alert?.label)
     }
 
+    @Test fun aCatSittingThereIsOneEventAMinute() {
+        val last = HashMap<String, Pair<RectF, Long>>()
+        val cat = f("cat", 0.8f, 0.4f, 0.5f, 0.6f, 0.8f)
+        assertTrue("first sighting", Detector.worthLogging(last, cat, 0))
+        assertTrue("still there 10 s later: no", !Detector.worthLogging(last, cat, 10_000))
+        assertTrue("called a dog in the same spot: same animal", !Detector.worthLogging(last, f("dog", 0.6f, 0.41f, 0.5f, 0.61f, 0.8f), 20_000))
+        assertTrue("a minute on, still there: one more", Detector.worthLogging(last, cat, 61_000))
+        assertTrue("moved across the picture: new", Detector.worthLogging(last, f("cat", 0.8f, 0.0f, 0.1f, 0.2f, 0.4f), 65_000))
+        assertTrue("a person meanwhile: new", Detector.worthLogging(last, f("person", 0.8f, 0.4f, 0.5f, 0.6f, 0.8f), 66_000))
+    }
+
     @Test fun picturesAreUpright() {
         // A sideways frame, top-left corner bright: turned 90 degrees it's at the top right.
         val y = ByteBuffer.allocateDirect(64 * 48)
