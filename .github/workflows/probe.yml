@@ -1,0 +1,12 @@
+name: Probe
+on: push
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          set +e
+          curl -sSLf -o m.tflite https://storage.googleapis.com/mediapipe-models/image_classifier/efficientnet_lite0/int8/1/efficientnet_lite0.tflite
+          unzip -o -q m.tflite
+          grep -n -i -E "fox|wallaby|kangaroo|rabbit|hare|snake|viper|python|cobra|mamba|boa|diamondback|sidewinder|possum|opossum|koala|wombat|echidna|platypus|adder|lizard|dingo|cat|dog" labels_without_background.txt | sed 's/^/HIT /'
+          sed -n '1,5p;280,300p' labels_without_background.txt | sed 's/^/SAMPLE /'
