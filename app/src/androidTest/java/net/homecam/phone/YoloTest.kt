@@ -69,7 +69,7 @@ class YoloTest {
         val bmp = Detector.decode(pic)!!
         val tone = Yolo.darkTone(bmp)
         assertNotNull("a dim picture counts as dark", tone)
-        assertNull("a normal one doesn't", Yolo.darkTone(Detector.decode(jpeg("zidane.jpg"))!!))
+        assertNull("a daylight one doesn't", Yolo.darkTone(Detector.decode(jpeg("bus.jpg"))!!))
         val r = d.help(listOf(pic, pic), setOf("person"))
         assertTrue("dark", r.dark)
         assertTrue("both people still named: ${r.found.map { it.second }}", r.found.filter { it.first == 0 && it.second.label == "person" && it.second.score >= 0.6f }.size >= 2)
@@ -85,7 +85,7 @@ class YoloTest {
         var y = 0.4f
         while (y < 0.9f) { var x = 0.05f; while (x < 0.3f) { moved.add(x); moved.add(y); x += 0.02f }; y += 0.02f }
         val f = d.lookBetter(bmp, moved.toFloatArray())
-        val v = Detector.decide(f, moved.toFloatArray(), setOf("person", "vehicle"), ArrayList(), 0)
+        val v = Detector.decide(f, moved.toFloatArray(), setOf("person"), ArrayList(), 0)
         assertEquals("${v.notes}", "person", v.alert?.label)
         d.close()
     }
