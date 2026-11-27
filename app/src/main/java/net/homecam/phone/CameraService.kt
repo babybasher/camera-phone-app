@@ -530,8 +530,14 @@ class CameraService : Service() {
                 try {
                     val bmp = Detector.picture(i, rot)
                     val found = detector.look(bmp)
+                    var d = Detector.decide(found, pts, want, still, System.currentTimeMillis()).copy(at = now)
+                    // Nothing it knows where it moved: ask the wildlife check about that patch.
+                    if (d.alert == null && "animal" in want) {
+                        val w = detector.wildlife(bmp, pts)
+                        if (w != null) d = d.copy(alert = w, notes = listOf("${Detector.NAMES[w.label]} ${(w.score * 100).toInt()}% (wildlife check)") + d.notes)
+                    }
                     bmp.recycle()
-                    v = Detector.decide(found, pts, want, still, System.currentTimeMillis()).copy(at = now)
+                    v = d
                 } catch (e: Throwable) {
                     detector.error = (e.message ?: e.toString()).take(200)
                 } finally {

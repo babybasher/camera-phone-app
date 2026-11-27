@@ -7,6 +7,7 @@ import android.graphics.RectF
 import com.google.mediapipe.framework.image.BitmapImageBuilder
 import com.google.mediapipe.tasks.core.BaseOptions
 import com.google.mediapipe.tasks.vision.core.RunningMode
+import com.google.mediapipe.tasks.vision.imageclassifier.ImageClassifier
 import com.google.mediapipe.tasks.vision.objectdetector.ObjectDetector
 import org.webrtc.VideoFrame
 
@@ -57,9 +58,58 @@ class Detector(private val ctx: Context) {
         return out
     }
 
+    // The wildlife check: a picture classifier (EfficientNet-Lite0, the 1,000 ImageNet things) asked
+    // about just the patch that moved, when the detector found nothing it knows there.
+    private var cls: ImageClassifier? = null
+    @Volatile var wildError = ""
+
+    private fun classifier(): ImageClassifier? {
+        cls?.let { return it }
+        if (wildError.isNotEmpty()) return null
+        return try {
+            val o = ImageClassifier.ImageClassifierOptions.builder()
+                .setBaseOptions(BaseOptions.builder().setModelAssetPath("wildlife.tflite").build())
+                .setRunningMode(RunningMode.IMAGE)
+                .setMaxResults(10)
+                .setScoreThreshold(0.03f)
+                .build()
+            ImageClassifier.createFromOptions(ctx, o).also { cls = it }
+        } catch (e: Throwable) {
+            wildError = (e.message ?: e.toString()).take(200)
+            null
+        }
+    }
+
+    /** Fox / kangaroo / rabbit / snake / lizard in the patch that moved, if sure enough (else null). */
+    fun wildlife(bmp: Bitmap, moved: FloatArray): Found? {
+        val box = movedBox(moved) ?: return null
+        val c = classifier() ?: return null
+        val w = bmp.width
+        val h = bmp.height
+        // Square in pixels around the patch (the classifier wants a squarish picture).
+        val cx = (box.left + box.right) / 2 * w
+        val cy = (box.top + box.bottom) / 2 * h
+        val side = maxOf(box.width() * w, box.height() * h, minOf(w, h) * 0.2f).coerceAtMost(minOf(w, h).toFloat())
+        val x0 = (cx - side / 2).coerceIn(0f, w - side).toInt()
+        val y0 = (cy - side / 2).coerceIn(0f, h - side).toInt()
+        val crop = Bitmap.createBitmap(bmp, x0, y0, side.toInt().coerceAtLeast(1), side.toInt().coerceAtLeast(1))
+        val cats = try {
+            c.classify(BitmapImageBuilder(crop).build()).classificationResult().classifications().firstOrNull()?.categories().orEmpty().map { Pair(it.categoryName(), it.score()) }
+        } catch (e: Throwable) {
+            wildError = (e.message ?: e.toString()).take(200)
+            emptyList()
+        } finally {
+            crop.recycle()
+        }
+        val (key, score) = wildPick(cats) ?: return null
+        return Found(key, score, RectF(x0.toFloat() / w, y0.toFloat() / h, (x0 + side) / w, (y0 + side) / h))
+    }
+
     fun close() {
         try { det?.close() } catch (_: Throwable) {}
         det = null
+        try { cls?.close() } catch (_: Throwable) {}
+        cls = null
     }
 
     companion object {
@@ -71,11 +121,55 @@ class Detector(private val ctx: Context) {
             // Bicycles and motorbikes: their own tick box (easily mistaken for each other, not for cars).
             "bicycle" to "bike", "motorcycle" to "bike",
             "bird" to "animal", "cat" to "animal", "dog" to "animal", "horse" to "animal", "sheep" to "animal", "cow" to "animal",
+            // From the wildlife check.
+            "fox" to "animal", "kangaroo" to "animal", "rabbit" to "animal", "snake" to "animal", "lizard" to "animal",
         )
         val NAMES = mapOf(
             "person" to "Person", "bicycle" to "Bicycle", "car" to "Car", "motorcycle" to "Motorbike", "bus" to "Bus",
             "truck" to "Truck", "bird" to "Bird", "cat" to "Cat", "dog" to "Dog", "horse" to "Horse", "sheep" to "Sheep", "cow" to "Cow",
+            "fox" to "Fox", "kangaroo" to "Kangaroo", "rabbit" to "Rabbit", "snake" to "Snake", "lizard" to "Lizard",
         )
+
+        /** The classifier's names (ImageNet) for the wildlife it can name. */
+        val WILD = mapOf(
+            "red fox" to "fox", "kit fox" to "fox", "Arctic fox" to "fox", "grey fox" to "fox",
+            "wallaby" to "kangaroo",
+            "wood rabbit" to "rabbit", "hare" to "rabbit", "Angora" to "rabbit",
+            "thunder snake" to "snake", "ringneck snake" to "snake", "hognose snake" to "snake", "green snake" to "snake",
+            "king snake" to "snake", "garter snake" to "snake", "water snake" to "snake", "vine snake" to "snake",
+            "night snake" to "snake", "boa constrictor" to "snake", "rock python" to "snake", "Indian cobra" to "snake",
+            "green mamba" to "snake", "sea snake" to "snake", "horned viper" to "snake", "diamondback" to "snake", "sidewinder" to "snake",
+            "banded gecko" to "lizard", "common iguana" to "lizard", "American chameleon" to "lizard", "whiptail" to "lizard",
+            "agama" to "lizard", "frilled lizard" to "lizard", "alligator lizard" to "lizard", "Gila monster" to "lizard",
+            "green lizard" to "lizard", "African chameleon" to "lizard", "Komodo dragon" to "lizard",
+        )
+        /** How sure, adding up its names for the same animal (red fox + grey fox...), before it's named. */
+        const val WILD_SURE = 0.4f
+
+        /** The wildlife a classifier's answers add up to, if sure enough. */
+        fun wildPick(cats: List<Pair<String, Float>>): Pair<String, Float>? {
+            val sums = HashMap<String, Float>()
+            for ((name, score) in cats) WILD[name]?.let { sums[it] = (sums[it] ?: 0f) + score }
+            return sums.maxByOrNull { it.value }?.takeIf { it.value >= WILD_SURE }?.toPair()
+        }
+
+        /**
+         * Where the picture changed, as a box (upright, 0..1), from the changed spots: the middle 80 %
+         * of them (a stray flicker elsewhere doesn't stretch it), a quarter bigger each way. Null
+         * with too few spots to go on.
+         */
+        fun movedBox(moved: FloatArray): RectF? {
+            val n = moved.size / 2
+            if (n < 3) return null
+            val xs = FloatArray(n) { moved[it * 2] }.sorted()
+            val ys = FloatArray(n) { moved[it * 2 + 1] }.sorted()
+            val lo = (n * 0.1).toInt()
+            val hi = (n * 0.9).toInt().coerceAtMost(n - 1)
+            val (l, r, t, b) = listOf(xs[lo], xs[hi], ys[lo], ys[hi])
+            val px = (r - l) * 0.25f + 0.02f
+            val py = (b - t) * 0.25f + 0.02f
+            return RectF((l - px).coerceAtLeast(0f), (t - py).coerceAtLeast(0f), (r + px).coerceAtMost(1f), (b + py).coerceAtMost(1f))
+        }
         // How sure it must be before an alert says so. People matter most and are what the
         // model knows best; others need a little more.
         fun needScore(label: String) = if (label == "person") 0.45f else 0.5f

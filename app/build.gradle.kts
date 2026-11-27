@@ -70,16 +70,22 @@ dependencies {
 // against its known checksum; kept out of git (app/src/main/assets/detect.tflite).
 val fetchModel = tasks.register("fetchModel") {
     doLast {
-        val url = "https://storage.googleapis.com/mediapipe-models/object_detector/efficientdet_lite2/int8/1/efficientdet_lite2.tflite"
-        val want = "b3f50554cb0ea559e90328845f7d9ba4d13c8bff372914d24e06bc8bb72fa896"
-        val f = file("src/main/assets/detect.tflite")
+        // (file in assets, address, sha256): the object detector, and the picture classifier for
+        // the wildlife check (foxes, kangaroos, rabbits, snakes, lizards). Both MediaPipe's, int8.
+        val models = listOf(
+            Triple("detect.tflite", "https://storage.googleapis.com/mediapipe-models/object_detector/efficientdet_lite2/int8/1/efficientdet_lite2.tflite", "b3f50554cb0ea559e90328845f7d9ba4d13c8bff372914d24e06bc8bb72fa896"),
+            Triple("wildlife.tflite", "https://storage.googleapis.com/mediapipe-models/image_classifier/efficientnet_lite0/int8/1/efficientnet_lite0.tflite", "bc2ffe19c1118de0c0c2a9088992da5589722656e0fba81421385300a4a34b16"),
+        )
         fun sha(x: File) = MessageDigest.getInstance("SHA-256").digest(x.readBytes()).joinToString("") { "%02x".format(it) }
-        if (f.exists() && sha(f) == want) return@doLast
-        f.parentFile.mkdirs()
-        val tmp = File(f.path + ".part")
-        URI(url).toURL().openStream().use { i -> tmp.outputStream().use { i.copyTo(it) } }
-        check(sha(tmp) == want) { "detection model: checksum doesn't match" }
-        tmp.renameTo(f)
+        for ((name, url, want) in models) {
+            val f = file("src/main/assets/$name")
+            if (f.exists() && sha(f) == want) continue
+            f.parentFile.mkdirs()
+            val tmp = File(f.path + ".part")
+            URI(url).toURL().openStream().use { i -> tmp.outputStream().use { i.copyTo(it) } }
+            check(sha(tmp) == want) { "$name: checksum doesn't match" }
+            tmp.renameTo(f)
+        }
     }
 }
 tasks.named("preBuild") { dependsOn(fetchModel) }

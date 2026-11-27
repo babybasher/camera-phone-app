@@ -6,3 +6,4 @@ local.properties
 .idea/
 app/src/main/assets/detect.tflite
 app/src/main/assets/*.part
+app/src/main/assets/wildlife.tflite

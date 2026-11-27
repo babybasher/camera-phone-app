@@ -92,6 +92,29 @@ class DetectorTest {
         assertEquals("people never count as parked", "person", Detector.decide(listOf(person), moved, all, still, 10 * 60_000).alert?.label)
     }
 
+    @Test fun wildlifeCheck() {
+        // Its names for the same animal add up; it must be sure enough.
+        assertEquals(Pair("fox", 0.5f), Detector.wildPick(listOf(Pair("red fox", 0.3f), Pair("grey fox", 0.2f), Pair("tabby", 0.25f))))
+        assertEquals("kangaroo", Detector.wildPick(listOf(Pair("wallaby", 0.62f)))?.first)
+        assertEquals("snake", Detector.wildPick(listOf(Pair("king snake", 0.2f), Pair("garter snake", 0.15f), Pair("rock python", 0.1f)))?.first)
+        assertNull("not sure enough", Detector.wildPick(listOf(Pair("hare", 0.3f), Pair("valley", 0.5f))))
+        assertNull("fox squirrel isn't a fox", Detector.wildPick(listOf(Pair("fox squirrel", 0.9f))))
+        assertEquals("animal", Detector.GROUPS["kangaroo"])
+        // The patch that moved: the middle of the spots, a bit bigger; a stray flicker doesn't stretch it.
+        val pts = ArrayList<Float>()
+        for (i in 0 until 40) { pts.add(0.5f + (i % 5) * 0.01f); pts.add(0.6f + (i / 5) * 0.01f) }
+        pts.add(0.02f); pts.add(0.02f)
+        val box = Detector.movedBox(pts.toFloatArray())!!
+        assertTrue("$box", box.left > 0.4f && box.right < 0.6f && box.top > 0.5f && box.bottom < 0.75f)
+        assertNull("too few spots", Detector.movedBox(floatArrayOf(0.5f, 0.5f)))
+        // The model loads and runs on Android; a plain grey patch is no animal.
+        val d = Detector(InstrumentationRegistry.getInstrumentation().targetContext)
+        val bmp = Bitmap.createBitmap(640, 480, Bitmap.Config.ARGB_8888).apply { eraseColor(Color.GRAY) }
+        assertNull(d.wildlife(bmp, pts.toFloatArray()))
+        assertEquals("the classifier loads from the app: '${d.wildError}'", "", d.wildError)
+        d.close()
+    }
+
     @Test fun aCatSittingThereIsOneEventAMinute() {
         val last = HashMap<String, Pair<RectF, Long>>()
         val cat = f("cat", 0.8f, 0.4f, 0.5f, 0.6f, 0.8f)
