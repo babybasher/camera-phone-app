@@ -73,6 +73,7 @@ class CameraService : Service() {
         const val QUIET_AFTER_NOTHING = 500L
 
         const val TAG = "CameraService"
+        const val NOTE_ID = 1
         @Volatile var instance: CameraService? = null
         /** The screen listens for changes here. */
         @Volatile var onChange: (() -> Unit)? = null
@@ -291,18 +292,30 @@ class CameraService : Service() {
         // app icon. Android keeps a channel's badge setting once made, so this is a new channel replacing "camera".
         runCatching { nm.deleteNotificationChannel("camera") }
         nm.createNotificationChannel(NotificationChannel("camera_on", "Camera running", NotificationManager.IMPORTANCE_LOW).apply { setShowBadge(false) })
+        startForegroundCompat(notification())
+    }
+
+    /** The notification again (the camera turned off or on). */
+    private fun notice() {
+        getSystemService(NotificationManager::class.java)?.notify(NOTE_ID, notification())
+    }
+
+    private fun notification(): Notification {
         val open = PendingIntent.getActivity(this, 0, Intent(this, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE)
-        val n = Notification.Builder(this, "camera_on")
+        return Notification.Builder(this, "camera_on")
             .setSmallIcon(R.drawable.ic_cam)
-            .setContentTitle("${cfg.name.ifEmpty { "Phone" }} camera is on")
-            .setContentText("Tap to see it or turn it off")
+            .setContentTitle(if (cfg.helperOnly) "${cfg.name.ifEmpty { "Phone" }}: camera off, helping" else "${cfg.name.ifEmpty { "Phone" }} camera is on")
+            .setContentText(if (cfg.helperOnly) "Helping the other cameras name what moved. Tap to change" else "Tap to see it or turn it off")
             .setContentIntent(open)
             .setOngoing(true)
             .build()
+    }
+
+    private fun startForegroundCompat(n: Notification) {
         if (Build.VERSION.SDK_INT >= 30) {
-            startForeground(1, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA or ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE)
+            startForeground(NOTE_ID, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA or ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE)
         } else {
-            startForeground(1, n)
+            startForeground(NOTE_ID, n)
         }
     }
 
@@ -342,7 +355,31 @@ class CameraService : Service() {
 
     // ---------------------------------------------------------------- the camera
 
-    private fun needCamera() = wantStream || motionOn || rec != null || photoWanted || thumbWanted || longActive()
+    private fun needCamera() = !cfg.helperOnly && (wantStream || motionOn || rec != null || photoWanted || thumbWanted || longActive())
+
+    /** The camera is off; the app only helps the other cameras (see Prefs.helperOnly). */
+    val helperOnly get() = cfg.helperOnly
+
+    /**
+     * Turn the camera off but keep helping the other cameras name what moved (on), or turn it on
+     * again (off). Off: whoever is watching is cut off, a recording ends, nothing can start one.
+     */
+    fun setHelperOnly(on: Boolean) {
+        h.post {
+            cfg.helperOnly = on
+            if (on) {
+                wantStream = false
+                photoWanted = false
+                if (longActive()) stopLong("")
+                if (rec != null) finishRecording()
+                if (talkPc != null) setTalk(false)
+            } else {
+                thumbWanted = true
+            }
+            notice()
+            update()
+        }
+    }
     @Volatile private var thumbWanted = true
     private var lastThumb = 0L
 
@@ -1284,13 +1321,19 @@ class CameraService : Service() {
                 }
                 "settings" -> applySettings(m.optJSONObject("settings") ?: JSONObject())
                 "name" -> { name = m.optString("name"); cfg.name = name; changed() }
-                "stream" -> { wantStream = m.optBoolean("on"); update() }
-                "record" -> if (m.optBoolean("stop")) { if (!recLong) finishRecording() } else startRecording(m.optInt("seconds", 30).coerceIn(5, 3600), true)
-                "long" -> if (m.optBoolean("stop")) stopLong("") else startLong(m.optDouble("hours", 3.0), m.optInt("fps", 0), m.optString("quality", "normal"), m.optBoolean("sound", false))
-                "photo" -> { photoWanted = true; update() }
+                // Its camera is off (helping only): nothing that needs it.
+                "stream", "record", "long", "photo", "talk", "torch" -> if (cfg.helperOnly && !m.optBoolean("stop") && m.optBoolean("on", true)) {
+                    Log.i(TAG, "${m.optString("cmd")} refused: the camera is off (helping only)")
+                } else when (m.optString("cmd")) {
+                    "stream" -> { wantStream = m.optBoolean("on"); update() }
+                    "record" -> if (m.optBoolean("stop")) { if (!recLong) finishRecording() } else startRecording(m.optInt("seconds", 30).coerceIn(5, 3600), true)
+                    "long" -> if (m.optBoolean("stop")) stopLong("") else startLong(m.optDouble("hours", 3.0), m.optInt("fps", 0), m.optString("quality", "normal"), m.optBoolean("sound", false))
+                    "photo" -> { photoWanted = true; update() }
+                    "talk" -> setTalk(m.optBoolean("on"))
+                    "torch" -> { torchCmd = m.optBoolean("on"); if (videoTrack != null) applyTorch() }
+                }
+                "helper_only" -> setHelperOnly(m.optBoolean("on", true))
                 "identify" -> identify(m)
-                "talk" -> setTalk(m.optBoolean("on"))
-                "torch" -> { torchCmd = m.optBoolean("on"); if (videoTrack != null) applyTorch() }
                 "removed" -> {
                     stopped = true
                     cfg.unlink()
@@ -1344,6 +1387,7 @@ class CameraService : Service() {
                             .put("dev", (Build.MANUFACTURER.replaceFirstChar { it.uppercase() } + " " + Build.MODEL).take(60))
                             .put("model", r.model + if ("animal" in want) " + wildlife check" else "")
                         if (r.dark) out.put("dark", true)
+                        out.put("glint", r.glint.toDouble())
                         helped++
                     }
                 }
@@ -1410,6 +1454,8 @@ class CameraService : Service() {
             .put("detect_ok", true)
             // Can look at a Reolink's pictures for the router, and how many times it has.
             .put("helper_ok", true)
+            // "helper": the camera is off and it only helps the other cameras.
+            .put("mode", if (cfg.helperOnly) "helper" else "camera")
             .put("helped", helped)
             .put("detect_error", if (detectOn()) detector.error else "")
             // The better detector: "" when here or not fetched yet, else fetching or what went wrong.
@@ -1431,6 +1477,7 @@ class CameraService : Service() {
             .put("long_error", longError))
         val parts = ArrayList<String>()
         parts.add(if (linked) "Connected to the router" else "Not connected")
+        if (cfg.helperOnly) parts.add(if (settings.optBoolean("helper", true)) "camera off, helping the other cameras" + (if (helped > 0) " (looked $helped times)" else "") else "camera off; helping is turned off in its settings")
         if (wantStream && pubState == "CONNECTED") parts.add("someone is watching")
         if (longActive()) parts.add(if (longUntil == Long.MAX_VALUE) "long record (until stopped)" else "long record until " + SimpleDateFormat("h:mm a", Locale.US).format(Date(longUntil)))
         else if (rec != null) parts.add("recording")

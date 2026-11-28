@@ -46,6 +46,13 @@ class Prefs(ctx: Context) {
     var running: Boolean
         get() = p.getBoolean("running", false)
         set(v) = p.edit().putBoolean("running", v).apply()
+    /**
+     * The camera is off but the app keeps helping the other cameras name what moved (turned off
+     * in the app, or kept as a helper only when removed from the camera list).
+     */
+    var helperOnly: Boolean
+        get() = p.getBoolean("helper_only", false)
+        set(v) = p.edit().putBoolean("helper_only", v).apply()
     /** Reserved for the built-in tunnel (WireGuard) in a later version. */
     var tunnelConfig: String
         get() = p.getString("tunnel", "") ?: ""

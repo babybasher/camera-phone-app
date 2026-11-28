@@ -107,7 +107,7 @@ class Detector(private val ctx: Context) {
     }
 
     /** A look at a Reolink's pictures for the router: what it saw in each (picture number, thing) and where they changed. */
-    class Help(val found: List<Pair<Int, Found>>, val moved: FloatArray, val pics: Int, val model: String = "EfficientDet-Lite2", val dark: Boolean = false)
+    class Help(val found: List<Pair<Int, Found>>, val moved: FloatArray, val pics: Int, val model: String = "EfficientDet-Lite2", val dark: Boolean = false, val glint: Float = 0f)
 
     /** The better detector (fetched from the camera page once); EfficientDet until it's here. */
     val yolo = Yolo(ctx)
@@ -142,7 +142,8 @@ class Detector(private val ctx: Context) {
             val widths = ok.map { size(it)!!.first }
             val full = Yolo.fullPic(widths)
             val small = widths.indices.filter { widths[it] == widths.minOrNull() }
-            val moved = if (full >= 0 && small.size >= 2) changes(small.map { grid(bmps[it]) }) else changes(bmps.map { grid(it) })
+            val grids = if (full >= 0 && small.size >= 2) small.map { grid(bmps[it]) } else bmps.map { grid(it) }
+            val moved = changes(grids)
             val better = yolo.ready() && bmps.isNotEmpty()
             var dark = false
             if (better) {
@@ -172,7 +173,7 @@ class Detector(private val ctx: Context) {
             }
             val known = found.any { (_, f) -> GROUPS.containsKey(f.label) && f.score >= needScore(f.label) && movedIn(f.box, moved) >= 2 }
             if (!known && "animal" in want && bmps.isNotEmpty()) wildlife(bmps.last(), moved)?.let { found.add(Pair(bmps.size - 1, it)) }
-            return Help(found, moved, bmps.size, if (usedBetter) Yolo.NAME else "EfficientDet-Lite2", dark)
+            return Help(found, moved, bmps.size, if (usedBetter) Yolo.NAME else "EfficientDet-Lite2", dark, glintShare(grids))
         } finally {
             bmps.forEach { it.recycle() }
         }
@@ -249,6 +250,18 @@ class Detector(private val ctx: Context) {
         fun needScore(label: String) = if (label == "person") 0.45f else 0.5f
 
         /** A JPEG as a picture about 1,000 wide at most (plenty for the detector; a 2 MP one is halved). */
+        /** Of the spots that changed, the share very bright in either picture (sun glint). */
+        fun glintShare(grids: List<IntArray>): Float {
+            var changed = 0
+            var bright = 0
+            for (k in 1 until grids.size) {
+                val a = grids[k - 1]
+                val b = grids[k]
+                for (i in a.indices) if (Math.abs(a[i] - b[i]) > 22) { changed++; if (maxOf(a[i], b[i]) > 225) bright++ }
+            }
+            return if (changed == 0) 0f else Math.round(bright * 100f / changed) / 100f
+        }
+
         /** A JPEG's width and height, or null if it isn't one. */
         fun size(jpeg: ByteArray): Pair<Int, Int>? {
             val o = BitmapFactory.Options().apply { inJustDecodeBounds = true }

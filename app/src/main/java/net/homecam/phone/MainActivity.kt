@@ -37,6 +37,7 @@ class MainActivity : Activity() {
     private var statusView: TextView? = null
     private var problemView: TextView? = null
     private var toggle: Button? = null
+    private var stopAll: Button? = null
 
     private val bg = Color.parseColor("#101418")
     private val card = Color.parseColor("#1B2229")
@@ -177,7 +178,7 @@ class MainActivity : Activity() {
 
     private fun showSetup() {
         window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-        statusView = null; problemView = null; toggle = null
+        statusView = null; problemView = null; toggle = null; stopAll = null
         page {
             addView(text("Use this phone as a camera", 24f, bold = true))
             addView(text("Sign in to your camera page once. The camera then keeps working with the screen off; keep the phone plugged in.", 15f, muted))
@@ -307,11 +308,24 @@ class MainActivity : Activity() {
             pv.tag = hint
             preview = pv
             addView(frame)
+            // Off: the camera turns off but the app keeps helping the other cameras name what moved
+            // (no one can watch or record through it). On again: a camera as before.
             toggle = button("", primary = true) {
-                if (CameraService.instance != null) CameraService.stop(this@MainActivity) else askPermissions()
+                val s = CameraService.instance
+                when {
+                    s == null -> { cfg.helperOnly = false; askPermissions() }
+                    s.helperOnly -> s.setHelperOnly(false)
+                    else -> s.setHelperOnly(true)
+                }
                 window.decorView.postDelayed({ refresh() }, 300)
             }
             addView(toggle)
+            stopAll = button("Stop everything") {
+                CameraService.stop(this@MainActivity)
+                window.decorView.postDelayed({ refresh() }, 300)
+            }
+            addView(stopAll)
+            addView(text("Turning the camera off keeps the app helping the other cameras name what moved; no one can watch or record through it. Stop everything stops that too.", 13f, muted))
             addView(text("You can lock the phone or leave this screen; the camera keeps running. The notification shows it is on.", 13f, muted))
             addView(button("Allow running in the background") {
                 try { startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)) } catch (_: Exception) {}
@@ -402,10 +416,11 @@ class MainActivity : Activity() {
             return
         }
         val s = CameraService.instance
-        statusView?.text = if (s == null) "Camera is off. Turn it on to show up in the camera list." else s.line
+        statusView?.text = if (s == null) "Stopped. Turn the camera on to show up in the camera list and help the other cameras." else s.line
         problemView?.text = s?.problem ?: ""
         problemView?.visibility = if ((s?.problem ?: "").isEmpty()) View.GONE else View.VISIBLE
-        toggle?.text = if (s == null) "Turn the camera on" else "Turn the camera off"
+        toggle?.text = if (s == null || s.helperOnly) "Turn the camera on" else "Turn the camera off"
+        stopAll?.visibility = if (s == null) View.GONE else View.VISIBLE
         val running = s != null && s.videoTrack != null
         if (running && !previewOn) startPreview() else if (!running && previewOn) stopPreview()
     }
