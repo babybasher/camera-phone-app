@@ -150,6 +150,39 @@ class Yolo(private val ctx: Context) {
         return nms(found)
     }
 
+    /**
+     * A detailed look at a full-size camera picture: where it changed (box, 0..1; null: all of
+     * it) cut straight from the JPEG at its own resolution, in at most DETAIL_MOST squares. Boxes
+     * as fractions of the whole picture.
+     */
+    fun lookDetail(jpeg: ByteArray, box: RectF?, tone: Tone = Tone.PLAIN): List<Detector.Found> {
+        if (get() == null) return emptyList()
+        val (w, h) = Detector.size(jpeg) ?: return emptyList()
+        @Suppress("DEPRECATION")
+        val dec = try { android.graphics.BitmapRegionDecoder.newInstance(jpeg, 0, jpeg.size, false) } catch (e: Throwable) { null } ?: return emptyList()
+        val found = ArrayList<Detector.Found>()
+        try {
+            for (t in detailTiles(w, h, box, SIZE, if (box == null) DETAIL_ALL else DETAIL_MOST)) {
+                val r = android.graphics.Rect((t.left * w).toInt(), (t.top * h).toInt(), (t.right * w).toInt().coerceAtMost(w), (t.bottom * h).toInt().coerceAtMost(h))
+                if (r.width() < 32 || r.height() < 32) continue
+                var sample = 1
+                while (r.width() / (sample * 2) >= SIZE) sample *= 2
+                val part = dec.decodeRegion(r, android.graphics.BitmapFactory.Options().apply { inSampleSize = sample }) ?: continue
+                try {
+                    for (f in look(part, null, tone)) {
+                        val b = f.box
+                        found.add(Detector.Found(f.label, f.score, RectF(t.left + b.left * t.width(), t.top + b.top * t.height(), t.left + b.right * t.width(), t.top + b.bottom * t.height())))
+                    }
+                } finally {
+                    part.recycle()
+                }
+            }
+        } finally {
+            dec.recycle()
+        }
+        return nms(found)
+    }
+
     fun close() {
         try { interp?.close() } catch (_: Throwable) {}
         interp = null
@@ -180,6 +213,43 @@ class Yolo(private val ctx: Context) {
             return md.digest().joinToString("") { "%02x".format(it) }
         }
 
+        /** Detail squares on a phone: where it changed, and when nothing did (all of it). */
+        const val DETAIL_MOST = 2
+        const val DETAIL_ALL = 4
+
+        /** Which picture is the camera's full-size one (half as wide again as the smallest), or -1. */
+        fun fullPic(widths: List<Int>): Int {
+            if (widths.size < 2) return -1
+            val small = widths.minOrNull() ?: return -1
+            val k = widths.indices.maxByOrNull { widths[it] } ?: return -1
+            return if (widths[k] * 2 >= small * 3) k else -1
+        }
+
+        /**
+         * Where to look at a w x h picture in detail, as crops (0..1): the changed area (null: all
+         * of it) at the picture's own resolution, in squares the detector's size, overlapping a
+         * little; bigger squares (shrunk to fit) if more than most would be needed.
+         */
+        fun detailTiles(w: Int, h: Int, box: RectF?, size: Int, most: Int): List<RectF> {
+            if (w <= 0 || h <= 0 || most <= 0) return emptyList()
+            val r = box ?: RectF(0f, 0f, 1f, 1f)
+            val x0 = r.left * w; val y0 = r.top * h; val x1 = r.right * w; val y1 = r.bottom * h
+            fun count(n: Float, t: Float) = if (n <= t) 1 else Math.ceil(((n - t * 0.2f) / (t * 0.8f)).toDouble()).toInt()
+            var t = size.toFloat()
+            while (count(x1 - x0, t) * count(y1 - y0, t) > most) t *= 1.25f
+            t = minOf(t, w.toFloat(), h.toFloat())
+            fun starts(lo: Float, hi: Float, limit: Float): List<Float> {
+                val n = count(hi - lo, t)
+                if (n == 1) return listOf(((lo + hi) / 2 - t / 2).coerceIn(0f, limit - t))
+                val step = (hi - lo - t) / (n - 1)
+                return (0 until n).map { (lo + step * it).coerceIn(0f, limit - t) }
+            }
+            val out = ArrayList<RectF>()
+            for (ys in starts(y0, y1, h.toFloat())) for (xs in starts(x0, x1, w.toFloat()))
+                out.add(RectF(xs / w, ys / h, minOf(1f, (xs + t) / w), minOf(1f, (ys + t) / h)))
+            return out
+        }
+
         /** The surest of overlapping boxes of the same thing; at most 30. */
         fun nms(f: List<Detector.Found>): List<Detector.Found> {
             val keep = ArrayList<Detector.Found>()
@@ -187,7 +257,21 @@ class Yolo(private val ctx: Context) {
                 if (keep.none { it.label == x.label && Detector.iou(it.box, x.box) > 0.5f }) keep.add(x)
                 if (keep.size == 30) break
             }
-            return keep
+            // A not-so-sure person where about as sure an animal is: the animal (a black dog
+            // standing side-on is a dark upright shape).
+            return keep.filter { p ->
+                !(p.label == "person" && p.score < 0.6f && keep.any { a -> a.label in ANIMALS && a.score >= p.score - 0.1f && (Detector.iou(p.box, a.box) > 0.3f || inside(p.box, a.box) || inside(a.box, p.box)) })
+            }
+        }
+
+        private val ANIMALS = setOf("bird", "cat", "dog", "horse", "sheep", "cow")
+
+        /** Most of a (80 %) is within b. */
+        fun inside(a: RectF, b: RectF): Boolean {
+            val iw = minOf(a.right, b.right) - maxOf(a.left, b.left)
+            val ih = minOf(a.bottom, b.bottom) - maxOf(a.top, b.top)
+            val area = a.width() * a.height()
+            return iw > 0 && ih > 0 && area > 0 && iw * ih >= 0.8f * area
         }
 
         /**

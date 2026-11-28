@@ -90,6 +90,54 @@ class YoloTest {
         d.close()
     }
 
+    /**
+     * Something small and far off: a man about 160 pixels tall in a 2560 x 1440 camera picture,
+     * 40 in its small ones. The full-size picture, looked at in detail where the small ones
+     * changed, makes him out.
+     */
+    @Test fun farAwayInTheFullPicture() {
+        val src = testCtx.assets.open("zidane.jpg").use { BitmapFactory.decodeStream(it) }
+        val man = android.graphics.Rect(src.width * 5 / 100, src.height * 15 / 100, src.width * 45 / 100, src.height)
+        fun scene(x: Int): Bitmap {
+            val b = Bitmap.createBitmap(2560, 1440, Bitmap.Config.ARGB_8888)
+            val c = Canvas(b)
+            c.drawColor(android.graphics.Color.rgb(125, 115, 95))
+            val h = 160
+            val w = h * man.width() / man.height()
+            c.drawBitmap(src, man, android.graphics.Rect(x, 900, x + w, 900 + h), Paint().apply { isFilterBitmap = true })
+            return b
+        }
+        fun jpg(b: Bitmap, w: Int, h: Int): ByteArray {
+            val s = Bitmap.createScaledBitmap(b, w, h, true)
+            val o = ByteArrayOutputStream()
+            s.compress(Bitmap.CompressFormat.JPEG, 85, o)
+            return o.toByteArray()
+        }
+        val d = Detector(ctx)
+        val a = scene(1500); val m = scene(1530); val b = scene(1560)
+        val smallOnly = d.help(listOf(jpg(a, 640, 360), jpg(b, 640, 360)), setOf("person"))
+        val t0 = System.currentTimeMillis()
+        val withFull = d.help(listOf(jpg(a, 640, 360), jpg(m, 2560, 1440), jpg(b, 640, 360)), setOf("person"))
+        val ms = System.currentTimeMillis() - t0
+        fun best(r: Detector.Help, pic: Int) = r.found.filter { it.second.label == "person" && (pic < 0 || it.first == pic) }.maxOfOrNull { it.second.score } ?: 0f
+        android.util.Log.i("YoloTest", "far away: small pictures ${best(smallOnly, -1)}, full-size in detail ${best(withFull, 1)}, $ms ms")
+        assertTrue("made out in the full-size picture: ${withFull.found.map { it.second }} (small only: ${best(smallOnly, -1)})", best(withFull, 1) >= 0.6f && best(withFull, 1) >= best(smallOnly, -1) + 0.1f)
+        assertTrue("where it changed, from the small ones", withFull.moved.isNotEmpty())
+        d.close()
+    }
+
+    @Test fun detailSquares() {
+        val one = Yolo.detailTiles(2560, 1440, RectF(0.5f, 0.5f, 0.55f, 0.6f), 640, 2)
+        assertEquals(1, one.size)
+        assertEquals(640f, one[0].width() * 2560, 1f)
+        val all = Yolo.detailTiles(2560, 1440, null, 640, 4)
+        assertTrue(all.size in 1..4)
+        assertEquals(0f, all.minOf { it.left }, 0.001f); assertEquals(1f, all.maxOf { it.right }, 0.001f)
+        assertEquals(1, Yolo.fullPic(listOf(640, 2560, 640))); assertEquals(-1, Yolo.fullPic(listOf(640, 640)))
+        val dogNotPerson = Yolo.nms(listOf(Detector.Found("person", 0.51f, RectF(0.5f, 0.4f, 0.55f, 0.5f)), Detector.Found("dog", 0.45f, RectF(0.49f, 0.41f, 0.56f, 0.5f))))
+        assertEquals(listOf("dog"), dogNotPerson.map { it.label })
+    }
+
     @Test fun closeUpBox() {
         val c = Yolo.closeUp(RectF(0.45f, 0.45f, 0.5f, 0.5f))!!
         assertEquals(1f / 3, c.width(), 0.001f)

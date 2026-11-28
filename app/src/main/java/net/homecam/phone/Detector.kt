@@ -132,20 +132,34 @@ class Detector(private val ctx: Context) {
      * whole and close up, brightened at night.
      */
     fun help(jpegs: List<ByteArray>, want: Set<String>): Help {
-        val bmps = jpegs.mapNotNull { decode(it) }
+        val ok = jpegs.filter { size(it) != null }
+        val bmps = ok.mapNotNull { decode(it) }
         try {
+            if (bmps.size != ok.size) return help(emptyList(), want)
             val found = ArrayList<Pair<Int, Found>>()
-            val moved = changes(bmps.map { grid(it) })
+            // The camera's full-size picture among its small ones: looked at in detail (where
+            // they changed, at its own resolution). Where they changed: from the small ones.
+            val widths = ok.map { size(it)!!.first }
+            val full = Yolo.fullPic(widths)
+            val small = widths.indices.filter { widths[it] == widths.minOrNull() }
+            val moved = if (full >= 0 && small.size >= 2) changes(small.map { grid(bmps[it]) }) else changes(bmps.map { grid(it) })
             val better = yolo.ready() && bmps.isNotEmpty()
             var dark = false
             if (better) {
                 val t0 = System.currentTimeMillis()
-                val picks = if (bmps.size <= 2) bmps.indices.toList() else listOf(0, bmps.size - 1)
+                if (full >= 0) {
+                    val tone = Yolo.darkTone(bmps[full])
+                    if (tone != null) dark = true
+                    yolo.lookDetail(ok[full], movedBox(moved), tone ?: Yolo.Tone.PLAIN).forEach { found.add(Pair(full, it)) }
+                }
+                val plain = bmps.indices.filter { it != full }
+                val picks = if (plain.size <= 2) plain else listOf(plain.first(), plain.last())
                 for (k in picks) {
                     val tone = Yolo.darkTone(bmps[k])
                     if (tone != null) dark = true
-                    // Slow phone: no close-ups once half the router's wait is gone.
-                    val f = if (System.currentTimeMillis() - t0 > 1800) yolo.look(bmps[k], null, tone ?: Yolo.Tone.PLAIN) else lookBetter(bmps[k], moved, tone)
+                    // With a full-size picture (looked at closely already), or on a slow phone once
+                    // half the router's wait is gone: no close-ups.
+                    val f = if (full >= 0 || System.currentTimeMillis() - t0 > 1800) yolo.look(bmps[k], null, tone ?: Yolo.Tone.PLAIN) else lookBetter(bmps[k], moved, tone)
                     f.forEach { found.add(Pair(k, it)) }
                 }
             }
@@ -235,6 +249,13 @@ class Detector(private val ctx: Context) {
         fun needScore(label: String) = if (label == "person") 0.45f else 0.5f
 
         /** A JPEG as a picture about 1,000 wide at most (plenty for the detector; a 2 MP one is halved). */
+        /** A JPEG's width and height, or null if it isn't one. */
+        fun size(jpeg: ByteArray): Pair<Int, Int>? {
+            val o = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            BitmapFactory.decodeByteArray(jpeg, 0, jpeg.size, o)
+            return if (o.outWidth > 0 && o.outHeight > 0) Pair(o.outWidth, o.outHeight) else null
+        }
+
         fun decode(jpeg: ByteArray): Bitmap? {
             val o = BitmapFactory.Options().apply { inJustDecodeBounds = true }
             BitmapFactory.decodeByteArray(jpeg, 0, jpeg.size, o)
