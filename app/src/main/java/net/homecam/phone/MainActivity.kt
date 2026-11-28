@@ -98,6 +98,31 @@ class MainActivity : Activity() {
         }.start()
     }
 
+    /**
+     * Not set up yet: the setup copied on the camera page ("Copy setup for the app"), for
+     * browsers that won't open apps (LineageOS's own). Android lets an app read the clipboard
+     * only while it's on screen with focus, so it's checked then, and offered once per copy.
+     */
+    private var offeredSetup = ""
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (!hasFocus || cfg.ready) return
+        val text = try {
+            (getSystemService(CLIPBOARD_SERVICE) as android.content.ClipboardManager).primaryClip?.getItemAt(0)?.coerceToText(this)?.toString()?.trim()
+        } catch (_: Exception) { null } ?: return
+        if (!text.startsWith("homecam://setup?") || !text.contains("pair=") || text == offeredSetup) return
+        offeredSetup = text
+        val u = Uri.parse(text)
+        val where = u.getQueryParameter("server")?.removePrefix("https://")?.removePrefix("http://") ?: "your camera page"
+        AlertDialog.Builder(this)
+            .setTitle("Set up this camera?")
+            .setMessage("You copied the setup from $where. Use it to set up this device as a camera?")
+            .setPositiveButton("Set up") { _, _ -> if (!fromLink(u)) { setupMessage = "That setup didn't work. Copy it again on the camera page."; show() } }
+            .setNegativeButton("Not now", null)
+            .show()
+    }
+
     override fun onResume() {
         super.onResume()
         CameraService.onChange = { refresh() }

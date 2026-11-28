@@ -171,6 +171,10 @@ class Yolo(private val ctx: Context) {
                 try {
                     for (f in look(part, null, tone)) {
                         val b = f.box
+                        // Cut by this square's edge (not the picture's): half a parked car would look
+                        // like a car somewhere new. Big things are found in the whole-picture looks.
+                        val near = 0.01f
+                        if ((t.left > 0f && b.left <= near) || (t.top > 0f && b.top <= near) || (t.right < 1f && b.right >= 1f - near) || (t.bottom < 1f && b.bottom >= 1f - near)) continue
                         found.add(Detector.Found(f.label, f.score, RectF(t.left + b.left * t.width(), t.top + b.top * t.height(), t.left + b.right * t.width(), t.top + b.bottom * t.height())))
                     }
                 } finally {
